@@ -1,124 +1,123 @@
 #pragma once
-// include/controller/KohzuManager.hpp
-
-#include "comm/AsioTcpClient.hpp"
-#include "controller/MotorController.hpp"
-#include "controller/Poller.hpp"
-#include "controller/StateCache.hpp"
+/**
+ * KohzuManager.hpp (refactored)
+ *
+ * Manager that orchestrates MotorController, Poller and StateCache.
+ *
+ * Responsibilities:
+ *  - create and manage MotorController lifecycle
+ *  - create and manage Poller and StateCache
+ *  - optionally run a reconnect loop (startAsync)
+ *  - provide a simplified API for client usage (moveAbsoluteAsync, register handlers)
+ *
+ * Threading:
+ *  - startAsync launches a background reconnection thread if autoReconnect==true
+ *  - All public methods are thread-safe unless documented otherwise
+ *
+ * Note: This manager currently assumes a single device/controller. It is straightforward to
+ * extend to multiple controllers by changing controller_ to a collection.
+ */
 
 #include <chrono>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
-#include <vector>
 #include <atomic>
+#include <optional>
+#include <vector>
+
+#include "MotorController.hpp"
+#include "Poller.hpp"
+#include "StateCache.hpp"
+#include "../comm/AsioTcpClient.hpp"
+#include "../protocol/Dispatcher.hpp"
 
 namespace kohzu::controller {
 
-/*
- KohzuManager
- - 자동 연결 전용 상위 래퍼 (연결, 동작, 실시간 위치 갱신을 위한 Poller/StateCache 관리)
- - Poller/StateCache는 Manager가 생성/소유. Poller는 기본적으로 '정지' 상태로 생성됩니다.
- - 동작 명령(responseMethod == 0 : "when completed")을 발행하면 active operation 카운터를 올리고 Poller를 시작합니다.
- - 해당 동작의 응답(완료 또는 오류)을 받으면 카운터를 내리고, 0이면 Poller를 멈춥니다.
-*/
 class KohzuManager {
 public:
-    using ConnectionHandler = std::function<void(bool connected, const std::string& message)>;
-    using ActionCallback = std::function<void(const kohzu::protocol::Response&, std::exception_ptr)>;
+    using ms = std::chrono::milliseconds;
+    using SpontaneousHandler = kohzu::protocol::Dispatcher::SpontaneousHandler;
+    using AsyncCallback = MotorController::AsyncCallback;
 
-    KohzuManager(const std::string& host, uint16_t port,
+    KohzuManager(const std::string& host,
+                 uint16_t port,
                  bool autoReconnect = false,
-                 std::chrono::milliseconds reconnectInterval = std::chrono::milliseconds(5000),
-                 std::chrono::milliseconds pollInterval = std::chrono::milliseconds(100));
-
+                 ms reconnectInterval = ms(5000),
+                 ms pollInterval = ms(500),
+                 ms fastPollInterval = ms(100));
     ~KohzuManager();
 
-    // Start background connect attempts (returns immediately).
-    void startAsync();
-
-    // Stop background operations and disconnect if connected. Blocks until stopped.
-    void stop();
-
-    // Single connect attempt (blocking). Returns true on success and sets outMessage.
-    bool connectOnce(std::string& outMessage);
-
-    // Query connection state
-    bool isConnected() const;
-
-    // Access MotorController (may be nullptr if not connected)
-    std::shared_ptr<MotorController> getMotorController() const;
-
-    // Register connection state handler. Handlers are called from manager thread.
-    void registerConnectionHandler(ConnectionHandler handler);
-
-    // Set which axes Poller should monitor (can be called before or after connect).
-    // If poller already exists, it will be updated with new axes.
-    void setPollAxes(const std::vector<int>& axes);
-
-    // Access StateCache (may be null if poller not created yet).
-    // Returns nullptr if no poller exists yet.
-    StateCache* getStateCache();
-
-    // ---- Action APIs (비동기) ----
-    // Move absolute. Returns false immediately if request couldn't be sent (e.g., not connected).
-    bool moveAbsoluteAsync(int axis,
-                           std::int64_t absolutePosition,
-                           int speedTable = 0,
-                           int responseMethod = 0, // 0 = when completed (default)
-                           ActionCallback cb = nullptr);
-
-    // Move relative.
-    bool moveRelativeAsync(int axis,
-                           std::int64_t delta,
-                           int speedTable = 0,
-                           int responseMethod = 0,
-                           ActionCallback cb = nullptr);
-
-private:
-    void runConnectLoop();
-
-    // helpers to manage poller lifecycle w.r.t active operations
-    void notifyOperationStarted();
-    void notifyOperationFinished();
-
-    const std::string host_;
-    const uint16_t port_;
-    const bool autoReconnect_;
-    const std::chrono::milliseconds reconnectInterval_;
-    const std::chrono::milliseconds pollInterval_;
-
-    // owned instances (created on demand)
-    std::shared_ptr<kohzu::comm::AsioTcpClient> tcpClient_;
-    std::shared_ptr<MotorController> motorCtrl_;
-
-    // poller / state cache (owned by manager)
-    std::unique_ptr<Poller> poller_;
-    std::vector<int> pollAxes_;
-
-    // background thread for connect attempts
-    mutable std::mutex threadMutex_;
-    std::thread connectThread_;
-    std::atomic<bool> running_{false};
-    std::atomic<bool> connected_{false};
-
-    // connection handler list
-    mutable std::mutex handlersMutex_;
-    std::vector<ConnectionHandler> handlers_;
-
-    // operation activity counter (when >0, poller should run)
-    std::atomic<int> activeOperations_{0};
-    std::mutex pollerMutex_; // protects poller_ creation/stop/start
-
-    // connect thread synchronization
-    std::mutex connectMutex_;
-
-    // prevent copying
+    // non-copyable
     KohzuManager(const KohzuManager&) = delete;
     KohzuManager& operator=(const KohzuManager&) = delete;
+
+    // start manager: if autoReconnect==true, runs background reconnection thread
+    // otherwise, attempts a single connect and returns (throws on failure)
+    void startAsync(); // launches recon thread if configured
+    void stop();
+
+    // create controller (for now single controller) and attempt connect once
+    // returns true on success
+    bool connectOnce();
+
+    // status
+    bool isRunning() const noexcept;        // manager running (reconnect thread)
+    bool isConnected() const noexcept;      // controller connected
+
+    // high level commands
+    // move absolute asynchronously: axis, position. Optional callback invoked when response arrives.
+    void moveAbsoluteAsync(int axis, long position, AsyncCallback cb = nullptr);
+
+    // register a handler for spontaneous messages (Manager will forward to controller)
+    void registerSpontaneousHandler(SpontaneousHandler h);
+
+    // Axis list management for Poller
+    void setPollAxes(const std::vector<int>& axes);
+    void addPollAxis(int axis);
+    void removePollAxis(int axis);
+
+    // For advanced use: notify operation start/finish (can be called by external code)
+    void notifyOperationStarted(int axis);
+    void notifyOperationFinished(int axis);
+
+    // Get a snapshot of current state cache
+    std::unordered_map<int, AxisState> snapshotState() const;
+
+private:
+    void reconnectionLoop();
+
+    // host/port
+    std::string host_;
+    uint16_t port_;
+
+    // options
+    bool autoReconnect_;
+    ms reconnectInterval_;
+    ms pollInterval_;
+    ms fastPollInterval_;
+
+    // core owned components
+    std::shared_ptr<kohzu::comm::AsioTcpClient> tcpClient_;
+    std::shared_ptr<kohzu::protocol::Dispatcher> dispatcher_;
+    std::shared_ptr<MotorController> controller_;
+    std::shared_ptr<StateCache> cache_;
+    std::shared_ptr<Poller> poller_;
+
+    // reconnection thread
+    std::thread reconThread_;
+    std::atomic<bool> running_{false};
+
+    // synchronization
+    mutable std::mutex mtx_;
+
+    // helper to teardown/create controller/poller
+    void teardown();
+    void setupControllerAndPoller();
+
+    // flag used to signal manual stop
+    std::atomic<bool> stopRequested_{false};
 };
 
 } // namespace kohzu::controller
-
