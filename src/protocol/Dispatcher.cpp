@@ -1,6 +1,6 @@
 // src/protocol/Dispatcher.cpp
-#include "Dispatcher.hpp"
-#include "Parser.hpp" // for Response type
+#include "protocol/Dispatcher.hpp"
+#include "protocol/Parser.hpp" // for Response type
 
 #include <chrono>
 #include <exception>
