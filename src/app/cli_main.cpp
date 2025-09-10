@@ -1,33 +1,51 @@
 // src/app/cli_main.cpp
-#include "controller/KohzuManager.hpp"
-
 #include <iostream>
 #include <string>
-#include <thread>
-#include <vector>
 #include <sstream>
-#include <chrono>
+#include <vector>
+#include <thread>
 #include <atomic>
-#include <algorithm>
-#include <unordered_map>
-#include <limits>
+#include <csignal>
+#include <chrono>
+#include <iomanip>
 
-using namespace kohzu::controller;
+#include "controller/KohzuManager.hpp"
+
 using namespace std::chrono_literals;
+using namespace kohzu::controller;
+using kohzu::protocol::Response;
 
-static std::vector<int> parseAxes(const std::string& s) {
-    std::vector<int> out;
-    std::stringstream ss(s);
-    std::string tok;
-    while (std::getline(ss, tok, ',')) {
-        // trim
-        tok.erase(tok.begin(), std::find_if(tok.begin(), tok.end(), [](int ch){ return !std::isspace(ch); }));
-        tok.erase(std::find_if(tok.rbegin(), tok.rend(), [](int ch){ return !std::isspace(ch); }).base(), tok.end());
-        if (tok.empty()) continue;
+static std::atomic<bool> g_stop{false};
+static KohzuManager* g_manager_ptr = nullptr;
+
+void sigint_handler(int /*signum*/) {
+    g_stop.store(true);
+    if (g_manager_ptr) {
         try {
-            int a = std::stoi(tok);
-            if (a > 0) out.push_back(a);
+            g_manager_ptr->stop();
         } catch (...) {}
+    }
+}
+
+static std::vector<std::string> split_ws(const std::string& s) {
+    std::istringstream iss(s);
+    std::vector<std::string> out;
+    std::string tok;
+    while (iss >> tok) out.push_back(tok);
+    return out;
+}
+
+static std::vector<int> parse_axis_list(const std::string& s) {
+    std::vector<int> out;
+    std::istringstream iss(s);
+    std::string item;
+    while (std::getline(iss, item, ',')) {
+        try {
+            int a = std::stoi(item);
+            out.push_back(a);
+        } catch (...) {
+            // skip invalid
+        }
     }
     return out;
 }
@@ -35,280 +53,188 @@ static std::vector<int> parseAxes(const std::string& s) {
 int main(int argc, char** argv) {
     std::string host = "192.168.1.120";
     uint16_t port = 12321;
+    bool autoReconnect = false;
 
-    if (argc > 1) host = argv[1];
-    if (argc > 2) {
-        try { port = static_cast<uint16_t>(std::stoi(argv[2])); } catch(...) {}
+    // Parse optional CLI args: host port autoreconnect
+    if (argc >= 2) host = argv[1];
+    if (argc >= 3) {
+        try { port = static_cast<uint16_t>(std::stoi(argv[2])); } catch (...) {}
+    }
+    if (argc >= 4) {
+        std::string ar = argv[3];
+        if (ar == "1" || ar == "true" || ar == "yes") autoReconnect = true;
     }
 
-    std::cout << "Kohzu CLI (manager-based)\n";
-    std::cout << "Host: " << host << " Port: " << port << "\n";
-    std::cout << "Enter axes to monitor (comma separated), e.g. 1,2,3 : ";
-    std::string axesLine;
-    std::getline(std::cin, axesLine);
-    auto axes = parseAxes(axesLine);
-    if (axes.empty()) {
-        std::cout << "No axes specified; default to axis 1\n";
-        axes = {1};
-    }
+    KohzuManager manager(host, port, autoReconnect);
+    g_manager_ptr = &manager;
 
-    // Create manager: no auto-reconnect for CLI by default; poll interval 100ms
-    KohzuManager mgr(host, port, /*autoReconnect=*/false, std::chrono::milliseconds(5000), std::chrono::milliseconds(100));
-    mgr.setPollAxes(axes);
+    // install SIGINT handler for graceful shutdown
+    std::signal(SIGINT, sigint_handler);
 
-    // register connection handler
-    std::atomic<bool> connected{false};
-    mgr.registerConnectionHandler([&connected](bool ok, const std::string& msg) {
-        if (ok) {
-            std::cout << "[Manager] Connected: " << msg << "\n";
-            connected.store(true);
+    // register spontaneous handler: print raw line and parsed details
+    manager.registerSpontaneousHandler([](const Response& resp) {
+        // This handler will be invoked asynchronously (Dispatcher uses async)
+        std::cout << "\n[SPONT] raw: " << resp.raw << "\n";
+        std::cout << "        type=" << resp.type << " cmd=" << resp.cmd;
+        if (!resp.axis.empty()) std::cout << " axis=" << resp.axis;
+        if (!resp.params.empty()) {
+            std::cout << " params=[";
+            for (size_t i=0;i<resp.params.size();++i) {
+                if (i) std::cout << ",";
+                std::cout << resp.params[i];
+            }
+            std::cout << "]";
+        }
+        std::cout << std::endl << "> " << std::flush; // prompt
+    });
+
+    // start manager (either startAsync which may start recon thread, or connect once)
+    if (autoReconnect) {
+        std::cout << "[CLI] Starting manager with autoReconnect ON\n";
+        manager.startAsync();
+    } else {
+        std::cout << "[CLI] Attempting single connect to " << host << ":" << port << " ...\n";
+        bool ok = manager.connectOnce();
+        if (!ok) {
+            std::cerr << "[CLI] connectOnce failed. You can run 'start' to enable auto reconnect.\n";
         } else {
-            std::cout << "[Manager] Disconnected/Failed: " << msg << "\n";
-            connected.store(false);
+            std::cout << "[CLI] connected\n";
         }
-    });
-
-    // start connect in background
-    mgr.startAsync();
-
-    // wait up to 10s for connection
-    for (int i = 0; i < 100 && !connected.load(); ++i) {
-        std::this_thread::sleep_for(100ms);
-    }
-    if (!connected.load()) {
-        std::cout << "Warning: not connected after waiting. You can still try commands (they will fail) or quit.\n";
     }
 
-    // Monitor thread: print only when position changed, and print final position once when motion stops.
-    std::atomic<bool> monitorRun{true};
+    std::cout << "kohzu-controller CLI (manager-based)\n";
+    std::cout << "Type 'help' for commands.\n";
 
-    // per-axis tracking
-    std::unordered_map<int, std::int64_t> lastPrinted; // last printed position
-    std::unordered_map<int, bool> finalPrinted;        // whether final already printed
-    std::unordered_map<int, std::chrono::steady_clock::time_point> lastChangeTime;
-
-    const auto stableThreshold = std::chrono::milliseconds(500);
-
-    std::thread monitorThread([&mgr, &axes, &monitorRun, &lastPrinted, &finalPrinted, &lastChangeTime, stableThreshold]() {
-        while (monitorRun.load()) {
-            StateCache* cache = mgr.getStateCache();
-            if (cache) {
-                auto snap = cache->snapshot();
-                auto now = std::chrono::steady_clock::now();
-
-                for (int a : axes) {
-                    auto it = snap.find(a);
-                    if (it == snap.end()) {
-                        // no data yet for this axis
-                        continue;
-                    }
-                    const auto &s = it->second;
-                    std::int64_t pos = s.position;
-                    bool running = s.running;
-
-                    // if axis is running, reset finalPrinted so we will print updates
-                    if (running) {
-                        finalPrinted[a] = false;
-                    }
-
-                    // initialize lastPrinted sentinel if not present
-                    if (lastPrinted.find(a) == lastPrinted.end()) {
-                        // use a sentinel value different from likely positions
-                        lastPrinted[a] = std::numeric_limits<std::int64_t>::min();
-                    }
-
-                    bool printedThisCycle = false;
-
-                    if (pos != lastPrinted[a]) {
-                        // position changed since last printed -> print update
-                        // timestamp
-                        auto tnow = std::chrono::system_clock::now();
-                        std::time_t t = std::chrono::system_clock::to_time_t(tnow);
-                        std::tm tm;
-                        #ifdef _WIN32
-                            localtime_s(&tm, &t);
-                        #else
-                            localtime_r(&t, &tm);
-                        #endif
-                        char buf[64];
-                        std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
-
-                        std::ostringstream oss;
-                        oss << "[" << buf << "] ";
-                        oss << "A" << a << ": pos=" << pos << (running ? "(run)" : "(stopped)") ;
-                        std::cout << oss.str() << "\n";
-
-                        lastPrinted[a] = pos;
-                        lastChangeTime[a] = now;
-                        printedThisCycle = true;
-                    }
-
-                    // If not running (motion ended), and we haven't printed final yet, check stability
-                    if (!running && !finalPrinted[a]) {
-                        // If we never printed (lastPrinted == sentinel), still print final once
-                        if (lastPrinted[a] == std::numeric_limits<std::int64_t>::min()) {
-                            // print final
-                            auto tnow = std::chrono::system_clock::now();
-                            std::time_t t = std::chrono::system_clock::to_time_t(tnow);
-                            std::tm tm;
-                            #ifdef _WIN32
-                                localtime_s(&tm, &t);
-                            #else
-                                localtime_r(&t, &tm);
-                            #endif
-                            char buf[64];
-                            std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
-
-                            std::ostringstream oss;
-                            oss << "[" << buf << "] ";
-                            oss << "A" << a << ": pos=" << pos << "(final)";
-                            std::cout << oss.str() << "\n";
-
-                            lastPrinted[a] = pos;
-                            finalPrinted[a] = true;
-                        } else {
-                            // we have previous printed pos; check stability time
-                            auto itTime = lastChangeTime.find(a);
-                            bool stableEnough = false;
-                            if (itTime != lastChangeTime.end()) {
-                                stableEnough = (now - itTime->second >= stableThreshold);
-                            } else {
-                                // no change time recorded -- consider it stable
-                                stableEnough = true;
-                            }
-
-                            if (stableEnough) {
-                                // print final (even if equal to last printed)
-                                auto tnow = std::chrono::system_clock::now();
-                                std::time_t t = std::chrono::system_clock::to_time_t(tnow);
-                                std::tm tm;
-                                #ifdef _WIN32
-                                    localtime_s(&tm, &t);
-                                #else
-                                    localtime_r(&t, &tm);
-                                #endif
-                                char buf[64];
-                                std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
-
-                                std::ostringstream oss;
-                                oss << "[" << buf << "] ";
-                                oss << "A" << a << ": pos=" << pos << "(final)";
-                                std::cout << oss.str() << "\n";
-
-                                finalPrinted[a] = true;
-                            }
-                        }
-                    }
-                }
-            } else {
-                // no poller/statecache available
-                // do not spam: print once per loop with small message
-                // (kept as before but less verbose)
-                std::cout << "[StateCache] not available (poller not created/connected)\n";
-            }
-            // refresh every 100 ms
-            std::this_thread::sleep_for(100ms);
+    std::string line;
+    while (!g_stop.load()) {
+        std::cout << "> " << std::flush;
+        if (!std::getline(std::cin, line)) {
+            // EOF or error -> exit
+            break;
         }
-    });
+        auto toks = split_ws(line);
+        if (toks.empty()) continue;
 
-    // interactive loop
-    std::cout << "Commands:\n";
-    std::cout << "  abs    -> absolute move\n";
-    std::cout << "  rel    -> relative move\n";
-    std::cout << "  state  -> print snapshot now\n";
-    std::cout << "  quit   -> exit\n";
-
-    std::string cmd;
-    while (true) {
-        std::cout << "> ";
-        if (!std::getline(std::cin, cmd)) break;
-        if (cmd.empty()) continue;
-
-        if (cmd == "quit") break;
-        if (cmd == "state") {
-            StateCache* cache = mgr.getStateCache();
-            if (!cache) {
-                std::cout << "StateCache not available\n";
-                continue;
-            }
-            auto snap = cache->snapshot();
-            for (auto &p : snap) {
-                const auto &s = p.second;
-                std::cout << "Axis " << p.first << " pos=" << s.position << " running=" << (s.running ? "Y":"N")
-                          << " updated(ms ago)="
-                          << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - s.updated).count()
-                          << " raw=\"" << s.lastRaw << "\"\n";
-            }
+        const std::string& cmd = toks[0];
+        if (cmd == "help") {
+            std::cout << "Commands:\n"
+                      << "  help                        : show this help\n"
+                      << "  start                       : start manager (autoReconnect mode)\n"
+                      << "  connect                     : attempt single connect (connectOnce)\n"
+                      << "  move abs <axis> <pos>       : move axis to absolute position (async)\n"
+                      << "  poll set <a,b,c>            : set poll axes list (comma separated)\n"
+                      << "  poll add <axis>             : add a poll axis\n"
+                      << "  poll rm <axis>              : remove a poll axis\n"
+                      << "  state                       : print state cache snapshot\n"
+                      << "  quit                        : exit CLI\n";
             continue;
-        }
-
-        if (cmd == "abs" || cmd == "rel") {
-            std::string axisStr, posStr, speedStr, respStr;
-            std::cout << "axis: ";
-            if (!std::getline(std::cin, axisStr)) break;
-            std::cout << "position (integer): ";
-            if (!std::getline(std::cin, posStr)) break;
-            std::cout << "speed table (0-9) [0]: ";
-            if (!std::getline(std::cin, speedStr)) speedStr = "";
-            std::cout << "responseMethod (0=when completed,1=quick) [0]: ";
-            if (!std::getline(std::cin, respStr)) respStr = "";
-
-            int axis = 0;
-            long long pos = 0;
-            int speed = 0;
-            int respMethod = 0;
+        } else if (cmd == "start") {
+            // enable manager reconnect loop
             try {
-                axis = std::stoi(axisStr);
-                pos = std::stoll(posStr);
-                if (!speedStr.empty()) speed = std::stoi(speedStr);
-                if (!respStr.empty()) respMethod = std::stoi(respStr);
-            } catch (...) {
-                std::cout << "Invalid numeric input\n";
-                continue;
-            }
-
-            // Callback prints completion and any response raw
-            auto cb = [axis](const kohzu::protocol::Response& resp, std::exception_ptr ep) {
-                if (ep) {
-                    try { std::rethrow_exception(ep); }
-                    catch (const std::exception& e) {
-                        std::cout << "[CB] Axis " << axis << " error: " << e.what() << "\n";
-                    } catch (...) {
-                        std::cout << "[CB] Axis " << axis << " unknown error\n";
-                    }
-                } else {
-                    std::cout << "[CB] Axis " << axis << " response raw=\"" << resp.raw << "\"\n";
-                }
-            };
-
-            bool ok = false;
-            if (cmd == "abs") {
-                ok = mgr.moveAbsoluteAsync(axis, pos, speed, respMethod, cb);
-            } else {
-                ok = mgr.moveRelativeAsync(axis, pos, speed, respMethod, cb);
-            }
-            if (!ok) {
-                std::cout << "Failed to send command (probably not connected)\n";
-            } else {
-                // clear finalPrinted for that axis so monitor will print updates for new op
-                finalPrinted[axis] = false;
-                lastPrinted[axis] = std::numeric_limits<std::int64_t>::min();
-                lastChangeTime.erase(axis);
-                std::cout << "Command sent (axis=" << axis << ")\n";
+                manager.startAsync();
+                std::cout << "[CLI] manager startAsync called\n";
+            } catch (const std::exception& e) {
+                std::cerr << "[CLI] startAsync error: " << e.what() << "\n";
             }
             continue;
+        } else if (cmd == "connect") {
+            bool ok = manager.connectOnce();
+            std::cout << (ok ? "[CLI] connectOnce succeeded\n" : "[CLI] connectOnce failed\n");
+            continue;
+        } else if (cmd == "move") {
+            if (toks.size() >= 4 && toks[1] == "abs") {
+                int axis = 0;
+                long pos = 0;
+                try { axis = std::stoi(toks[2]); } catch (...) { std::cerr << "[CLI] invalid axis\n"; continue; }
+                try { pos = std::stol(toks[3]); } catch (...) { std::cerr << "[CLI] invalid pos\n"; continue; }
+
+                // callback prints response or error
+                KohzuManager::AsyncCallback cb = [axis](const Response& r, std::exception_ptr ep) {
+                    if (ep) {
+                        try { std::rethrow_exception(ep); }
+                        catch (const std::exception& e) {
+                            std::cerr << "[MOVE cb] axis " << axis << " error: " << e.what() << "\n";
+                        } catch (...) {
+                            std::cerr << "[MOVE cb] axis " << axis << " unknown exception\n";
+                        }
+                    } else {
+                        std::cout << "[MOVE cb] axis " << axis << " response raw: " << r.raw << "\n";
+                    }
+                };
+
+                manager.moveAbsoluteAsync(axis, pos, cb);
+                std::cout << "[CLI] moveAbsoluteAsync dispatched\n";
+            } else {
+                std::cerr << "[CLI] usage: move abs <axis> <pos>\n";
+            }
+            continue;
+        } else if (cmd == "poll") {
+            if (toks.size() >= 3 && toks[1] == "set") {
+                // join rest tokens into one string after 'set'
+                std::string rest;
+                size_t pos = line.find("set");
+                if (pos != std::string::npos) {
+                    rest = line.substr(pos + 3);
+                }
+                // trim
+                auto first_non = rest.find_first_not_of(" \t");
+                if (first_non != std::string::npos) rest = rest.substr(first_non);
+                auto axes = parse_axis_list(rest);
+                manager.setPollAxes(axes);
+                std::cout << "[CLI] poll axes set\n";
+            } else if (toks.size() >= 3 && toks[1] == "add") {
+                try {
+                    int axis = std::stoi(toks[2]);
+                    manager.addPollAxis(axis);
+                    std::cout << "[CLI] poll add " << axis << "\n";
+                } catch (...) {
+                    std::cerr << "[CLI] invalid axis\n";
+                }
+            } else if (toks.size() >= 3 && (toks[1] == "rm" || toks[1] == "remove")) {
+                try {
+                    int axis = std::stoi(toks[2]);
+                    manager.removePollAxis(axis);
+                    std::cout << "[CLI] poll remove " << axis << "\n";
+                } catch (...) {
+                    std::cerr << "[CLI] invalid axis\n";
+                }
+            } else {
+                std::cerr << "[CLI] poll commands: poll set <a,b>, poll add <axis>, poll rm <axis>\n";
+            }
+            continue;
+        } else if (cmd == "state") {
+            auto snap = manager.snapshotState();
+            if (snap.empty()) {
+                std::cout << "[CLI] state cache empty\n";
+            } else {
+                std::cout << "State snapshot (" << snap.size() << " axes):\n";
+                auto now = std::chrono::steady_clock::now();
+                for (auto &kv : snap) {
+                    int axis = kv.first;
+                    const AxisState &st = kv.second;
+                    std::cout << "  axis " << axis << " : ";
+                    if (st.position.has_value()) std::cout << "pos=" << *st.position << " ";
+                    else std::cout << "pos=N/A ";
+                    if (st.running.has_value()) std::cout << "running=" << (*st.running ? "1" : "0") << " ";
+                    else std::cout << "running=N/A ";
+                    if (!st.raw.empty()) std::cout << "raw=\"" << st.raw << "\" ";
+                    auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - st.lastUpdated).count();
+                    std::cout << "age=" << age << "ms\n";
+                }
+            }
+            continue;
+        } else if (cmd == "quit" || cmd == "exit") {
+            std::cout << "[CLI] quitting...\n";
+            break;
+        } else {
+            std::cerr << "[CLI] unknown command: " << cmd << " (type 'help')\n";
         }
+    } // main loop
 
-        std::cout << "Unknown command\n";
-    }
-
-    // shutdown
-    monitorRun.store(false);
-    if (monitorThread.joinable()) monitorThread.join();
-
-    mgr.stop();
-
-    std::cout << "Exited\n";
+    // graceful shutdown
+    try {
+        manager.stop();
+    } catch (...) {}
+    std::cout << "[CLI] exited\n";
     return 0;
 }
-
