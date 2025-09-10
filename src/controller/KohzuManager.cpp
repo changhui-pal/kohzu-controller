@@ -1,5 +1,5 @@
 // src/controller/KohzuManager.cpp
-#include "KohzuManager.hpp"
+#include "controller/KohzuManager.hpp"
 
 #include <iostream>
 #include <chrono>
