@@ -1,8 +1,8 @@
 // src/controller/MotorController.cpp
-#include "MotorController.hpp"
-#include "../protocol/CommandBuilder.hpp"
-#include "../protocol/Parser.hpp"
-#include "../comm/Writer.hpp"
+#include "controller/MotorController.hpp"
+#include "protocol/CommandBuilder.hpp"
+#include "protocol/Parser.hpp"
+#include "comm/Writer.hpp"
 
 #include <iostream>
 #include <thread>
