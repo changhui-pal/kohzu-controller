@@ -1,78 +1,47 @@
 #include "comm/Writer.hpp"
 #include <iostream>
+#include <thread>
+#include <exception>
 
 namespace kohzu::comm {
 
-Writer::Writer(std::shared_ptr<ITcpClient> client, std::size_t maxQueueSize)
-    : client_(std::move(client)),
-      queue_(),
-      maxQueueSize_(std::max<std::size_t>(1, maxQueueSize)),
-      running_(false),
-      stopRequested_(false) {
-}
+Writer::Writer(std::shared_ptr<ITcpClient> client, std::size_t capacity)
+    : client_(client), capacity_(capacity) {}
 
 Writer::~Writer() {
-    try {
-        stop(true);
-    } catch (...) {
-        // destructor must not throw
-    }
+    stop(false);
 }
 
 void Writer::start() {
-    bool expected = false;
-    if (!running_.compare_exchange_strong(expected, true)) {
-        return; // already running
-    }
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (running_) return;
+    running_ = true;
     stopRequested_.store(false);
-    workerThread_ = std::thread(&Writer::workerLoop, this);
+    workerThread_ = std::thread([this]() { workerLoop(); });
 }
 
 void Writer::stop(bool flush) {
     {
         std::lock_guard<std::mutex> lk(mtx_);
+        running_ = false;
         stopRequested_.store(true);
-        // if not flushing, we may clear the queue to speed up exit
-        if (!flush) {
-            queue_.clear();
-            cv_not_full_.notify_all();
-        }
+        cv_not_empty_.notify_all();
+        cv_not_full_.notify_all();
     }
-    cv_not_empty_.notify_all();
-
-    if (workerThread_.joinable()) {
-        workerThread_.join();
+    if (workerThread_.joinable()) workerThread_.join();
+    if (!flush) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        while (!q_.empty()) q_.pop();
     }
-    running_.store(false);
 }
 
-void Writer::enqueue(const std::string& line) {
+Writer::EnqueueResult Writer::enqueue(const std::string& line) {
     std::unique_lock<std::mutex> lk(mtx_);
-    // Wait until there is space or stop requested
-    cv_not_full_.wait(lk, [this]() {
-        return stopRequested_.load() || queue_.size() < maxQueueSize_;
-    });
-
-    if (stopRequested_.load()) {
-        throw std::runtime_error("Writer is stopping/stopped; enqueue rejected");
-    }
-    queue_.push_back(line);
-    lk.unlock();
+    if (stopRequested_.load() || !running_) return EnqueueResult::Stopped;
+    if (q_.size() >= capacity_) return EnqueueResult::Overflow;
+    q_.push(line);
     cv_not_empty_.notify_one();
-}
-
-bool Writer::tryEnqueue(const std::string& line) {
-    std::lock_guard<std::mutex> lk(mtx_);
-    if (stopRequested_.load()) return false;
-    if (queue_.size() >= maxQueueSize_) return false;
-    queue_.push_back(line);
-    cv_not_empty_.notify_one();
-    return true;
-}
-
-std::size_t Writer::queuedSize() const noexcept {
-    std::lock_guard<std::mutex> lk(mtx_);
-    return queue_.size();
+    return EnqueueResult::OK;
 }
 
 void Writer::registerErrorHandler(ErrorHandler eh) {
@@ -81,64 +50,67 @@ void Writer::registerErrorHandler(ErrorHandler eh) {
 }
 
 void Writer::workerLoop() {
-    // Loop until stopRequested and queue empty (if flush) or until stopRequested immediate exit
     for (;;) {
         std::string item;
         {
             std::unique_lock<std::mutex> lk(mtx_);
-            cv_not_empty_.wait(lk, [this]() {
-                return stopRequested_.load() || !queue_.empty();
-            });
-
-            if (queue_.empty()) {
-                // woke up because stopRequested_ or spurious wake; check stop
-                if (stopRequested_.load()) {
-                    break;
-                } else {
-                    continue;
-                }
+            cv_not_empty_.wait(lk, [this]() { return stopRequested_.load() || !q_.empty(); });
+            if (stopRequested_.load() && q_.empty()) break;
+            if (!q_.empty()) {
+                item = std::move(q_.front());
+                q_.pop();
+                cv_not_full_.notify_one();
+            } else {
+                continue;
             }
-
-            // pop front
-            item = std::move(queue_.front());
-            queue_.pop_front();
-            // notify any waiting enqueue that there's space
-            cv_not_full_.notify_one();
         }
 
         // Attempt to send the line via ITcpClient
         try {
-            // Ensure the client exists and is connected; let client's sendLine throw if necessary
             if (!client_) {
                 throw std::runtime_error("Writer: ITcpClient is null");
             }
             client_->sendLine(item);
-        } catch (...) {
-            // Capture exception and call error handler (if set)
+        } catch (const std::exception& e) {
             std::exception_ptr ep = std::current_exception();
-            // call handler on worker thread (synchronous)
+            ErrorHandler eh;
             {
                 std::lock_guard<std::mutex> lk(mtx_);
-                if (errorHandler_) {
-                    try {
-                        errorHandler_(ep);
-                    } catch (...) {
-                        // swallow to avoid thread termination
-                    }
+                eh = errorHandler_;
+            }
+            if (eh) {
+                try {
+                    std::thread([eh, ep]() {
+                        try { eh(ep); } catch (...) { /* swallow */ }
+                    }).detach();
+                } catch (...) {
+                    try { eh(ep); } catch (...) { /* swallow */ }
                 }
             }
-            // After an error on send, typical choices:
-            //  - continue sending remaining items (best-effort)
-            //  - stop immediately
-            // Here we choose to stop to avoid further failures and to let upper layers react.
-            // Set stopRequested_ and notify
+            stopRequested_.store(true);
+            cv_not_empty_.notify_all();
+            break;
+        } catch (...) {
+            std::exception_ptr ep = std::current_exception();
+            ErrorHandler eh;
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                eh = errorHandler_;
+            }
+            if (eh) {
+                try {
+                    std::thread([eh, ep]() {
+                        try { eh(ep); } catch (...) { /* swallow */ }
+                    }).detach();
+                } catch (...) {
+                    try { eh(ep); } catch (...) { /* swallow */ }
+                }
+            }
             stopRequested_.store(true);
             cv_not_empty_.notify_all();
             break;
         }
     } // end for
-
-    // Exiting: optionally clear queue (we keep it, but stop() semantics decide flush)
 }
 
 } // namespace kohzu::comm
