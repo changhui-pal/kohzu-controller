@@ -1,3 +1,4 @@
+```
 // src/app/cli_main.cpp
 #include <iostream>
 #include <string>
@@ -8,9 +9,9 @@
 #include <csignal>
 #include <chrono>
 #include <iomanip>
-
 #include <sys/select.h>
 #include <unistd.h>
+#include <cerrno>
 
 #include "controller/KohzuManager.hpp"
 
@@ -21,7 +22,6 @@ using kohzu::protocol::Response;
 static std::atomic<bool> g_stop{false};
 
 void sigint_handler(int /*signum*/) {
-    // 시그널 핸들러에서는 안전한 동작(atomic flag 설정)만 수행
     g_stop.store(true);
 }
 
@@ -29,7 +29,9 @@ static std::vector<std::string> split_ws(const std::string& s) {
     std::istringstream iss(s);
     std::vector<std::string> out;
     std::string tok;
-    while (iss >> tok) out.push_back(tok);
+    while (iss >> tok) {
+        out.push_back(tok);
+    }
     return out;
 }
 
@@ -38,132 +40,145 @@ static std::vector<int> parse_axis_list(const std::string& s) {
     std::istringstream iss(s);
     std::string item;
     while (std::getline(iss, item, ',')) {
+        // Trim whitespace
+        size_t b = item.find_first_not_of(" \t");
+        size_t e = item.find_last_not_of(" \t");
+        if (b == std::string::npos) continue;
+        std::string trimmed = item.substr(b, e - b + 1);
         try {
-            // trim whitespace
-            size_t b = item.find_first_not_of(" \t");
-            size_t e = item.find_last_not_of(" \t");
-            if (b == std::string::npos) continue;
-            std::string trimmed = item.substr(b, e - b + 1);
             int a = std::stoi(trimmed);
+            if (a <= 0) {
+                std::cerr << "[CLI] Warning: Skipping invalid axis " << trimmed << " (must be positive)\n";
+                continue;
+            }
             out.push_back(a);
-        } catch (...) {
-            // skip invalid entries
+        } catch (const std::exception& e) {
+            std::cerr << "[CLI] Warning: Skipping invalid axis '" << trimmed << "': " << e.what() << "\n";
         }
     }
     return out;
 }
 
-/**
- * attemptConnectWithPrompt:
- *  - manager.connectOnce() 를 시도
- *  - 실패 시 autoReconnect 여부에 따라 동작:
- *      - autoReconnect == true : 사용자에 의해 manager.startAsync() 가 이미 호출되었으므로 여기서는 실패 알림만 함
- *      - autoReconnect == false : 사용자에게 재시도 여부(y/n)를 물어봄. y -> 재시도, n -> false 반환
- *
- *  ※ g_stop 플래그를 수시로 체크하여 사용자가 Ctrl+C 누르면 루프를 탈출하도록 함.
- */
 bool attemptConnectWithPrompt(KohzuManager &manager, bool autoReconnect) {
     bool ok = manager.connectOnce();
     if (ok) {
-        std::cout << "[CLI] connected\n";
+        std::cout << "[CLI] Connected successfully to controller\n";
         return true;
     }
 
     if (autoReconnect) {
-        std::cerr << "[CLI] connectOnce failed. autoReconnect enabled; manager will handle reconnect.\n";
+        std::cerr << "[CLI] connectOnce failed. Auto-reconnect enabled; manager will retry in background.\n";
         return false;
     }
 
-    // interactive retry prompt
-    // 수정: 무한 루프 방지 위해 최대 5회 재시도 제한. 런타임 오류 방지.
-    int retryCount = 0;
+    // Interactive retry prompt
     const int maxRetries = 5;
+    int retryCount = 0;
     while (!ok && !g_stop.load() && retryCount < maxRetries) {
         std::cerr << "[CLI] connectOnce failed (attempt " << (retryCount + 1) << "/" << maxRetries << ").\n";
-        std::cout << "Do you want to retry connection? (y/n): " << std::flush;
+        std::cout << "Retry connection? (y/n): " << std::flush;
         std::string answer;
         if (!std::getline(std::cin, answer)) {
-            std::cerr << "[CLI] input error or EOF, exiting connect attempt.\n";
+            if (g_stop.load()) {
+                std::cerr << "[CLI] Input interrupted by signal, exiting connect attempt.\n";
+            } else {
+                std::cerr << "[CLI] Input error or EOF, exiting connect attempt.\n";
+            }
             return false;
         }
-        if (g_stop.load()) return false;
-        if (answer == "y" || answer == "Y") {
-            std::cout << "[CLI] retrying connection...\n";
+        if (g_stop.load()) {
+            std::cerr << "[CLI] Connection attempt aborted due to signal.\n";
+            return false;
+        }
+        if (answer.empty() || answer[0] == 'y' || answer[0] == 'Y') {
+            std::cout << "[CLI] Retrying connection...\n";
             ok = manager.connectOnce();
             if (ok) {
-                std::cout << "[CLI] connected\n";
+                std::cout << "[CLI] Connected successfully\n";
                 return true;
             }
             retryCount++;
         } else {
-            std::cerr << "[CLI] exiting due to connection failure.\n";
+            std::cerr << "[CLI] Connection attempt aborted by user.\n";
             return false;
         }
     }
     if (retryCount >= maxRetries) {
-        std::cerr << "[CLI] Max retries reached. Exiting connect attempt.\n";
+        std::cerr << "[CLI] Maximum retries (" << maxRetries << ") reached. Exiting connect attempt.\n";
     }
     return ok;
 }
 
 int main(int argc, char** argv) {
+    // Default configuration
     std::string host = "192.168.1.120";
     uint16_t port = 12321;
     bool autoReconnect = false;
 
-    // Parse optional CLI args: host port autoreconnect
+    // Parse command-line arguments
     if (argc >= 2) host = argv[1];
     if (argc >= 3) {
-        try { port = static_cast<uint16_t>(std::stoi(argv[2])); } catch (...) {}
+        try {
+            int p = std::stoi(argv[2]);
+            if (p < 1 || p > 65535) {
+                std::cerr << "[CLI] Invalid port " << argv[2] << ", using default " << port << "\n";
+            } else {
+                port = static_cast<uint16_t>(p);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[CLI] Invalid port '" << argv[2] << "': " << e.what() << ", using default " << port << "\n";
+        }
     }
     if (argc >= 4) {
         std::string ar = argv[3];
-        if (ar == "1" || ar == "true" || ar == "yes") autoReconnect = true;
+        autoReconnect = (ar == "1" || ar == "true" || ar == "yes");
     }
 
+    // Initialize manager
     KohzuManager manager(host, port, autoReconnect);
-    // install SIGINT handler for graceful shutdown (handler only sets flag)
     std::signal(SIGINT, sigint_handler);
 
-    // register spontaneous handler: print raw line and parsed details
+    // Register spontaneous handler
     manager.registerSpontaneousHandler([](const Response& resp) {
-        // This handler is invoked asynchronously by Dispatcher
-        std::cout << "\n[SPONT] raw: " << resp.raw << "\n";
-        std::cout << "        type=" << resp.type << " cmd=" << resp.cmd;
-        if (!resp.axis.empty()) std::cout << " axis=" << resp.axis;
+        std::cout << "\n[SPONT] Raw: " << resp.raw << "\n";
+        std::cout << "        Type=" << resp.type << " Cmd=" << resp.cmd;
+        if (!resp.axis.empty()) std::cout << " Axis=" << resp.axis;
         if (!resp.params.empty()) {
-            std::cout << " params=[";
-            for (size_t i=0;i<resp.params.size();++i) {
+            std::cout << " Params=[";
+            for (size_t i = 0; i < resp.params.size(); ++i) {
                 if (i) std::cout << ",";
                 std::cout << resp.params[i];
             }
             std::cout << "]";
         }
-        std::cout << std::endl << "> " << std::flush; // prompt
+        std::cout << "\n> " << std::flush;
     });
 
-    // connect or start manager depending on autoReconnect
+    // Connect or start manager
     if (autoReconnect) {
-        std::cout << "[CLI] Starting manager with autoReconnect ON\n";
-        manager.startAsync();
+        std::cout << "[CLI] Starting manager with auto-reconnect ON\n";
+        try {
+            manager.startAsync();
+        } catch (const std::exception& e) {
+            std::cerr << "[CLI] Failed to start manager: " << e.what() << "\n";
+            return 1;
+        }
     } else {
-        std::cout << "[CLI] Attempting single connect to " << host << ":" << port << " ...\n";
-        bool ok = attemptConnectWithPrompt(manager, autoReconnect);
-        if (!ok) {
-            // ensure we stop cleanly
-            try { manager.stop(); } catch (const std::exception& e) {
-                std::cerr << "[CLI] stop error during failed connect: " << e.what() << "\n"; // 수정: 예외 로그
-            } catch (...) {
-                std::cerr << "[CLI] unknown stop error during failed connect\n";
+        std::cout << "[CLI] Attempting single connection to " << host << ":" << port << " ...\n";
+        if (!attemptConnectWithPrompt(manager, autoReconnect)) {
+            try {
+                manager.stop();
+            } catch (const std::exception& e) {
+                std::cerr << "[CLI] Stop error during failed connect: " << e.what() << "\n";
             }
             return 1;
         }
     }
 
-    std::cout << "kohzu-controller CLI (manager-based)\n";
-    std::cout << "Type 'help' for commands.\n";
+    std::cout << "kohzu-controller CLI\n";
+    std::cout << "Type 'help' for commands.\n> " << std::flush;
 
-    // Main interactive loop using select() so we can wake periodically and check g_stop
+    // Main loop with select()
     const int STDIN_FD = fileno(stdin);
     std::string line;
     while (!g_stop.load()) {
@@ -173,155 +188,184 @@ int main(int argc, char** argv) {
 
         struct timeval tv;
         tv.tv_sec = 0;
-        tv.tv_usec = 200000; // 200 ms
+        tv.tv_usec = 100000; // 100ms for responsiveness
 
-        int rv = select(STDIN_FD + 1, &readfds, NULL, NULL, &tv);
+        int rv = select(STDIN_FD + 1, &readfds, nullptr, nullptr, &tv);
         if (rv == -1) {
-            // error; if interrupted by signal and g_stop is set, break
-            if (g_stop.load()) break;
-            // otherwise continue
+            if (errno == EINTR && g_stop.load()) {
+                std::cerr << "[CLI] Interrupted by signal, exiting.\n";
+                break;
+            }
+            std::cerr << "[CLI] select() error: " << strerror(errno) << "\n";
             continue;
         } else if (rv == 0) {
-            // timeout: re-check stop flag
-            continue;
-        } else {
-            if (FD_ISSET(STDIN_FD, &readfds)) {
-                if (!std::getline(std::cin, line)) {
-                    // EOF or error -> exit loop
-                    break;
+            continue; // Timeout, check g_stop again
+        }
+
+        if (FD_ISSET(STDIN_FD, &readfds)) {
+            if (!std::getline(std::cin, line)) {
+                if (g_stop.load()) {
+                    std::cerr << "[CLI] Input interrupted by signal, exiting.\n";
+                } else {
+                    std::cerr << "[CLI] Input error or EOF, exiting.\n";
                 }
-                auto toks = split_ws(line);
-                if (toks.empty()) continue;
+                break;
+            }
+            if (line.empty()) {
+                std::cout << "> " << std::flush;
+                continue;
+            }
 
-                const std::string& cmd = toks[0];
-                if (cmd == "help") {
-                    std::cout << "Commands:\n"
-                              << "  help                        : show this help\n"
-                              << "  start                       : start manager (autoReconnect mode)\n"
-                              << "  connect                     : attempt single connect (connectOnce)\n"
-                              << "  move abs <axis> <pos>       : move axis to absolute position (async)\n"
-                              << "  poll set <a,b,c>            : set poll axes list (comma separated)\n"
-                              << "  poll add <axis>             : add a poll axis\n"
-                              << "  poll rm <axis>              : remove a poll axis\n"
-                              << "  state                       : print state cache snapshot\n"
-                              << "  quit                        : exit CLI\n";
-                    continue;
-                } else if (cmd == "start") {
-                    try {
-                        manager.startAsync();
-                        std::cout << "[CLI] manager startAsync called\n";
-                    } catch (const std::exception& e) {
-                        std::cerr << "[CLI] startAsync error: " << e.what() << "\n";
-                    }
-                    continue;
-                } else if (cmd == "connect") {
-                    bool ok = attemptConnectWithPrompt(manager, autoReconnect);
-                    std::cout << (ok ? "[CLI] connectOnce succeeded\n" : "[CLI] connectOnce failed or aborted\n");
-                    continue;
-                } else if (cmd == "move") {
-                    if (toks.size() >= 4 && toks[1] == "abs") {
-                        int axis = 0;
-                        long pos = 0;
-                        try { axis = std::stoi(toks[2]); } catch (...) { std::cerr << "[CLI] invalid axis\n"; continue; }
-                        try { pos = std::stol(toks[3]); } catch (...) { std::cerr << "[CLI] invalid pos\n"; continue; }
+            auto toks = split_ws(line);
+            const std::string& cmd = toks[0];
 
-                        // callback prints response or error
-                        KohzuManager::AsyncCallback cb = [axis](const Response& r, std::exception_ptr ep) {
-                            if (ep) {
-                                try { std::rethrow_exception(ep); }
-                                catch (const std::exception& e) {
-                                    std::cerr << "[MOVE cb] axis " << axis << " error: " << e.what() << "\n";
-                                } catch (...) {
-                                    std::cerr << "[MOVE cb] axis " << axis << " unknown exception\n";
-                                }
-                            } else {
-                                std::cout << "[MOVE cb] axis " << axis << " response raw: " << r.raw << "\n";
-                            }
-                        };
+            if (cmd == "help") {
+                std::cout << "Commands:\n"
+                          << "  help                        : Show this help\n"
+                          << "  start                       : Start manager (auto-reconnect mode)\n"
+                          << "  connect                     : Attempt single connection\n"
+                          << "  move abs <axis> <pos>       : Move axis to absolute position (async)\n"
+                          << "  poll set <a,b,c>            : Set poll axes list (comma-separated)\n"
+                          << "  poll add <axis>             : Add a poll axis\n"
+                          << "  poll rm <axis>              : Remove a poll axis\n"
+                          << "  state                       : Print state cache snapshot\n"
+                          << "  quit                        : Exit CLI\n";
+            } else if (cmd == "start") {
+                try {
+                    manager.startAsync();
+                    std::cout << "[CLI] Manager started with auto-reconnect\n";
+                } catch (const std::exception& e) {
+                    std::cerr << "[CLI] startAsync error: " << e.what() << "\n";
+                }
+            } else if (cmd == "connect") {
+                bool ok = attemptConnectWithPrompt(manager, autoReconnect);
+                std::cout << (ok ? "[CLI] Connection succeeded\n" : "[CLI] Connection failed or aborted\n");
+            } else if (cmd == "move" && toks.size() >= 4 && toks[1] == "abs") {
+                int axis = 0;
+                long pos = 0;
+                try {
+                    axis = std::stoi(toks[2]);
+                    if (axis <= 0) throw std::invalid_argument("Axis must be positive");
+                } catch (const std::exception& e) {
+                    std::cerr << "[CLI] Invalid axis '" << toks[2] << "': " << e.what() << "\n";
+                    std::cout << "> " << std::flush;
+                    continue;
+                }
+                try {
+                    pos = std::stol(toks[3]);
+                } catch (const std::exception& e) {
+                    std::cerr << "[CLI] Invalid position '" << toks[3] << "': " << e.what() << "\n";
+                    std::cout << "> " << std::flush;
+                    continue;
+                }
 
+                KohzuManager::AsyncCallback cb = [axis](const Response& r, std::exception_ptr ep) {
+                    if (ep) {
                         try {
-                            manager.moveAbsoluteAsync(axis, pos, cb);
-                            std::cout << "[CLI] moveAbsoluteAsync dispatched\n";
+                            std::rethrow_exception(ep);
                         } catch (const std::exception& e) {
-                            std::cerr << "[CLI] moveAbsoluteAsync error: " << e.what() << "\n"; // 수정: 예외 처리
+                            std::cerr << "[MOVE cb] Axis " << axis << " error: " << e.what() << "\n";
+                        } catch (...) {
+                            std::cerr << "[MOVE cb] Axis " << axis << " unknown error\n";
                         }
                     } else {
-                        std::cerr << "[CLI] usage: move abs <axis> <pos>\n";
+                        std::cout << "[MOVE cb] Axis " << axis << " response: " << r.raw << "\n";
                     }
-                    continue;
-                } else if (cmd == "poll") {
-                    if (toks.size() >= 3 && toks[1] == "set") {
-                        // join rest tokens into one string after 'set'
-                        std::string rest;
-                        size_t pos = line.find("set");
-                        if (pos != std::string::npos) {
-                            rest = line.substr(pos + 3);
-                        }
-                        // trim
-                        auto first_non = rest.find_first_not_of(" \t");
-                        if (first_non != std::string::npos) rest = rest.substr(first_non);
-                        auto axes = parse_axis_list(rest);
+                    std::cout << "> " << std::flush;
+                };
+
+                try {
+                    manager.moveAbsoluteAsync(axis, pos, cb);
+                    std::cout << "[CLI] Move command dispatched (axis=" << axis << ", pos=" << pos << ")\n";
+                } catch (const std::exception& e) {
+                    std::cerr << "[CLI] moveAbsoluteAsync error: " << e.what() << "\n";
+                }
+            } else if (cmd == "poll" && toks.size() >= 3) {
+                if (toks[1] == "set") {
+                    std::string rest = line.substr(line.find("set") + 3);
+                    auto axes = parse_axis_list(rest);
+                    try {
                         manager.setPollAxes(axes);
-                        std::cout << "[CLI] poll axes set\n";
-                    } else if (toks.size() >= 3 && toks[1] == "add") {
-                        try {
-                            int axis = std::stoi(toks[2]);
-                            manager.addPollAxis(axis);
-                            std::cout << "[CLI] poll add " << axis << "\n";
-                        } catch (...) {
-                            std::cerr << "[CLI] invalid axis\n";
+                        std::cout << "[CLI] Poll axes set: ";
+                        for (size_t i = 0; i < axes.size(); ++i) {
+                            if (i) std::cout << ",";
+                            std::cout << axes[i];
                         }
-                    } else if (toks.size() >= 3 && (toks[1] == "rm" || toks[1] == "remove")) {
-                        try {
-                            int axis = std::stoi(toks[2]);
-                            manager.removePollAxis(axis);
-                            std::cout << "[CLI] poll remove " << axis << "\n";
-                        } catch (...) {
-                            std::cerr << "[CLI] invalid axis\n";
-                        }
-                    } else {
-                        std::cerr << "[CLI] poll commands: poll set <a,b>, poll add <axis>, poll rm <axis>\n";
+                        std::cout << "\n";
+                    } catch (const std::exception& e) {
+                        std::cerr << "[CLI] setPollAxes error: " << e.what() << "\n";
                     }
-                    continue;
-                } else if (cmd == "state") {
+                } else if (toks[1] == "add") {
+                    try {
+                        int axis = std::stoi(toks[2]);
+                        if (axis <= 0) throw std::invalid_argument("Axis must be positive");
+                        manager.addPollAxis(axis);
+                        std::cout << "[CLI] Added poll axis " << axis << "\n";
+                    } catch (const std::exception& e) {
+                        std::cerr << "[CLI] Invalid axis '" << toks[2] << "': " << e.what() << "\n";
+                    }
+                } else if (toks[1] == "rm" || toks[1] == "remove") {
+                    try {
+                        int axis = std::stoi(toks[2]);
+                        if (axis <= 0) throw std::invalid_argument("Axis must be positive");
+                        manager.removePollAxis(axis);
+                        std::cout << "[CLI] Removed poll axis " << axis << "\n";
+                    } catch (const std::exception& e) {
+                        std::cerr << "[CLI] Invalid axis '" << toks[2] << "': " << e.what() << "\n";
+                    }
+                } else {
+                    std::cerr << "[CLI] Usage: poll set <a,b,c> | poll add <axis> | poll rm <axis>\n";
+                }
+            } else if (cmd == "state") {
+                try {
                     auto snap = manager.snapshotState();
                     if (snap.empty()) {
-                        std::cout << "[CLI] state cache empty\n";
+                        std::cout << "[CLI] State cache empty\n";
                     } else {
                         std::cout << "State snapshot (" << snap.size() << " axes):\n";
                         auto now = std::chrono::steady_clock::now();
-                        for (auto &kv : snap) {
+                        for (const auto& kv : snap) {
                             int axis = kv.first;
-                            const AxisState &st = kv.second;
-                            std::cout << "  axis " << axis << " : ";
-                            if (st.position.has_value()) std::cout << "pos=" << *st.position << " ";
-                            else std::cout << "pos=N/A ";
-                            if (st.running.has_value()) std::cout << "running=" << (*st.running ? "1" : "0") << " ";
-                            else std::cout << "running=N/A ";
-                            if (!st.raw.empty()) std::cout << "raw=\"" << st.raw << "\" ";
+                            const AxisState& st = kv.second;
+                            std::cout << "  Axis " << axis << ": ";
+                            if (st.position.has_value()) {
+                                std::cout << "pos=" << *st.position << " ";
+                            } else {
+                                std::cout << "pos=N/A ";
+                            }
+                            if (st.running.has_value()) {
+                                std::cout << "running=" << (*st.running ? "yes" : "no") << " ";
+                            } else {
+                                std::cout << "running=N/A ";
+                            }
+                            if (!st.raw.empty()) {
+                                std::cout << "raw=\"" << st.raw << "\" ";
+                            }
                             auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - st.lastUpdated).count();
                             std::cout << "age=" << age << "ms\n";
                         }
                     }
-                    continue;
-                } else if (cmd == "quit" || cmd == "exit") {
-                    std::cout << "[CLI] quitting...\n";
-                    break;
-                } else {
-                    std::cerr << "[CLI] unknown command: " << cmd << " (type 'help')\n";
+                } catch (const std::exception& e) {
+                    std::cerr << "[CLI] snapshotState error: " << e.what() << "\n";
                 }
+            } else if (cmd == "quit" || cmd == "exit") {
+                std::cout << "[CLI] Quitting...\n";
+                break;
+            } else {
+                std::cerr << "[CLI] Unknown command: " << cmd << " (type 'help')\n";
             }
+            std::cout << "> " << std::flush;
         }
-    } // main loop
+    }
 
-    // Graceful shutdown performed from main thread
+    // Graceful shutdown
     try {
         manager.stop();
+        std::cout << "[CLI] Manager stopped\n";
     } catch (const std::exception& e) {
-        std::cerr << "[CLI] manager stop error: " << e.what() << "\n"; // 수정: 예외 로그
-    } catch (...) {
-        std::cerr << "[CLI] unknown manager stop error\n";
+        std::cerr << "[CLI] Manager stop error: " << e.what() << "\n";
+        return 1;
     }
-    std::cout << "[CLI] exited\n";
+    std::cout << "[CLI] Exited\n";
     return 0;
 }
