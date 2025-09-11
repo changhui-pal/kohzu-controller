@@ -1,12 +1,8 @@
 #pragma once
 
 #include "ITcpClient.hpp"
-
 #include <boost/asio.hpp>
-#include <thread>
-#include <atomic>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <functional>
 
@@ -28,7 +24,6 @@ public:
     void registerRecvHandler(RecvHandler handler) override;
     void sendLine(const std::string& line) override;
 
-    // notify upper layers on disconnect
     void setOnDisconnect(std::function<void()> cb) override;
 
 private:

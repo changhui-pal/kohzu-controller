@@ -1,46 +1,80 @@
 #pragma once
-/**
- * Parser.hpp
- *
- * 수신 라인(ASCII text line)을 파싱하여 Response 구조체로 반환.
- *
- * 규칙(구현에 맞춤):
- *  - 라인의 첫 문자는 'C' (normal) / 'W' (warning) / 'E' (error) 이어야 valid.
- *  - 이후 필드들은 탭('\t')으로 구분된다. 첫 필드(cmdField)의 앞 3문자가 명령(cmd).
- *    cmdField에 추가 문자가 있으면 숫자여야 하며 axis로 해석된다.
- *  - SYS 등 특수 명령은 별도 처리(필요시 params에 원문 보관).
- *  - CR/LF는 이미 제거된 라인을 입력으로 가정.
- *
- * 반환(Response):
- *  - type: 'C'/'W'/'E'
- *  - cmd: 대문자 3문자
- *  - axis: 문자열(없을수도 있음)
- *  - params: 나머지 파라미터들
- *  - raw: 원본 라인
- *  - valid: 파싱 성공 여부
- *
- * 주의: 파서가 valid=false를 반환하면 호출자가 로깅/무시/알람 등 적절히 처리해야 함.
- */
-
 #include <string>
 #include <vector>
+#include <sstream>
+#include <algorithm>
 
 namespace kohzu::protocol {
 
+/**
+ * Response: parsed line from device
+ * - valid: parsing success
+ * - command: command token (e.g., "RDP", "STR")
+ * - axis: axis index if applicable (-1 if none or invalid)
+ * - params: tokenized parameters (strings)
+ * - raw: original raw line
+ */
 struct Response {
-    char type{' '};                // 'C', 'W', 'E'
-    std::string cmd;               // 3-letter command, e.g., "RDP", "STR", "APS"
-    std::string axis;              // axis 정보(있으면)
-    std::vector<std::string> params; // 기타 파라미터
-    std::string raw;               // 원본 라인
-    bool valid{false};             // 파싱 성공 여부
+    bool valid{false};
+    std::string command;
+    int axis{-1};
+    std::vector<std::string> params;
+    std::string raw;
 };
 
-class Parser {
-public:
-    // parse: 주어진 한 라인을 파싱하여 Response 반환
-    // 입력: line (CRLF 제거된 상태 권장)
-    static Response parse(const std::string& line);
+struct ParseResult {
+    bool valid;
+    Response resp;
+};
+
+struct Parser {
+    // Simple parse: split by '\t' tokens. Accepts optional leading STX (0x02) and trailing CRLF.
+    static ParseResult parse(const std::string& line) {
+        Response r;
+        r.raw = line;
+        std::string s = line;
+        // trim trailing CR/LF
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+        // strip leading STX if present
+        if (!s.empty() && static_cast<unsigned char>(s.front()) == 0x02) {
+            s.erase(s.begin());
+        }
+        if (s.empty()) {
+            return {false, r};
+        }
+
+        // split by tab
+        std::vector<std::string> toks;
+        std::string cur;
+        std::istringstream iss(s);
+        while (std::getline(iss, cur, '\t')) {
+            toks.push_back(cur);
+        }
+        if (toks.empty()) return {false, r};
+
+        r.command = toks[0];
+        // params: everything except command
+        for (size_t i = 1; i < toks.size(); ++i) {
+            r.params.push_back(toks[i]);
+        }
+
+        // try axis from first param if numeric
+        if (!r.params.empty()) {
+            try {
+                size_t idx = 0;
+                int ax = std::stoi(r.params[0], &idx);
+                (void)idx;
+                r.axis = ax;
+            } catch (...) {
+                r.axis = -1;
+            }
+        } else {
+            r.axis = -1;
+        }
+
+        r.valid = !r.command.empty();
+        return {r.valid, r};
+    }
 };
 
 } // namespace kohzu::protocol

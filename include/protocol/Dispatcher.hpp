@@ -1,16 +1,4 @@
 #pragma once
-/**
- * Dispatcher.hpp
- *
- * 개선 요약:
- * - 동일 키의 다중 pending을 허용하도록 자료구조 변경 (deque of promises)
- * - spontaneous 핸들러 호출을 제한된 worker queue로 처리하여 스레드 폭증 방지
- *
- * 사용:
- *   auto fut = dispatcher.addPending(key);
- *   // ... writer.enqueue(...)
- *   auto resp = fut.get(); // 또는 fut.wait_for(...)
- */
 
 #include <future>
 #include <functional>
@@ -24,7 +12,7 @@
 #include <queue>
 #include <atomic>
 
-#include "Parser.hpp" // Response 정의
+#include "Parser.hpp"
 
 namespace kohzu::protocol {
 
@@ -42,7 +30,7 @@ public:
     // try to fulfill one pending promise for key (first-in). Returns true if fulfilled.
     bool tryFulfill(const std::string& key, const Response& response);
 
-    // remove/fulfill one pending for key with exception
+    // remove a single pending for key and set exception
     void removePendingWithException(const std::string& key, const std::string& message);
 
     // cancel all pending promises with the given exception message

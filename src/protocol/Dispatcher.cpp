@@ -1,20 +1,14 @@
 #include "protocol/Dispatcher.hpp"
-#include "protocol/Parser.hpp"
-
-#include <chrono>
-#include <exception>
-#include <future>
 #include <iostream>
-#include <utility>
 
 namespace kohzu::protocol {
 
 Dispatcher::Dispatcher() {
-    startWorkers();
+    startWorkers(DEFAULT_SPONT_WORKERS);
 }
 
 Dispatcher::~Dispatcher() {
-    // stop workers first to avoid tasks running while we cancel pending
+    // stop workers first, then cancel pending to avoid tasks running while we destruct promises
     stopAndJoinWorkers();
     cancelAllPendingWithException("Dispatcher shutting down");
 }
@@ -68,10 +62,8 @@ void Dispatcher::stopAndJoinWorkers() {
 std::future<Response> Dispatcher::addPending(const std::string& key) {
     std::promise<Response> prom;
     auto fut = prom.get_future();
-
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        // push a new promise into deque for this key
         pending_[key].push_back(std::move(prom));
     }
     return fut;
@@ -167,11 +159,9 @@ void Dispatcher::notifySpontaneous(const Response& resp) {
     }
     if (handlers.empty()) return;
 
-    // enqueue tasks for each handler (worker threads will execute them)
     {
         std::lock_guard<std::mutex> lk(taskMtx_);
         for (auto &h : handlers) {
-            // copy handler and response into task
             taskQueue_.emplace_back([h, resp]() {
                 try {
                     h(resp);
