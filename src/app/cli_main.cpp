@@ -1,4 +1,3 @@
-```
 // src/app/cli_main.cpp
 #include <iostream>
 #include <string>
