@@ -1,270 +1,307 @@
 // src/controller/MotorController.cpp
-
 #include "controller/MotorController.hpp"
+#include "protocol/CommandBuilder.hpp"
+#include "protocol/Parser.hpp"
+#include "comm/Writer.hpp"
 
 #include <iostream>
-#include <stdexcept>
+#include <thread>
+#include <queue>
+#include <optional>
+#include <set>
+#include <utility>
 
-using namespace kohzu::controller;
-namespace kc = kohzu::comm;
-namespace kp = kohzu::protocol;
+namespace kohzu::controller {
 
-MotorController::MotorController(std::shared_ptr<kohzu::comm::ITcpClient> comm)
-: comm_(comm), writer_(nullptr), dispatcher_() {
-    // register receive handler to route lines to dispatcher
-    comm_->registerRecvHandler([this](const std::string& line) {
-        this->onLineReceived(line);
-    });
+struct MotorController::Impl {
+    Impl(std::shared_ptr<kohzu::comm::ITcpClient> tcp,
+         std::shared_ptr<kohzu::protocol::Dispatcher> dispatcher)
+        : tcpClient(std::move(tcp)),
+          dispatcher(std::move(dispatcher)),
+          writer(nullptr),
+          cbWorkerRunning(false),
+          stopRequested(false) {}
 
-    // start callback worker thread
-    callbackWorkerStopRequested_.store(false);
-    callbackWorkerThread_ = std::thread([this]() { this->callbackWorkerLoop(); });
+    std::shared_ptr<kohzu::comm::ITcpClient> tcpClient;
+    std::shared_ptr<kohzu::protocol::Dispatcher> dispatcher;
+    std::unique_ptr<kohzu::comm::Writer> writer;
+
+    // callback worker queue entry
+    struct CallbackTask {
+        std::future<kohzu::protocol::Response> fut;
+        MotorController::AsyncCallback cb;
+        std::string key;
+        int axis{-1};
+    };
+
+    std::mutex cbMtx;
+    std::condition_variable cbCv;
+    std::deque<CallbackTask> cbQueue;
+    std::thread cbWorkerThread;
+    bool cbWorkerRunning;
+    std::atomic<bool> stopRequested;
+
+    // spontaneous handlers will be registered into dispatcher; MotorController just forwards
+    MotorController::OperationCallback onOperationStart;
+    MotorController::OperationCallback onOperationFinish;
+
+    // movement command set heuristic
+    std::set<std::string> movementCommands{"APS", "MPS", "RPS"};
+
+    // helper: build matching key for dispatcher
+    static std::string makeKey(const std::string& cmd, const std::vector<std::string>& params) {
+        std::string key = cmd;
+        if (!params.empty() && !params[0].empty()) {
+            key += ":" + params[0]; // assumes first param is axis
+        }
+        return key;
+    }
+
+    // parse axis from params[0] (returns -1 if not numeric)
+    static int parseAxisFromParams(const std::vector<std::string>& params) {
+        if (params.empty()) return -1;
+        try {
+            return std::stoi(params[0]);
+        } catch (...) {
+            return -1;
+        }
+    }
+};
+
+MotorController::MotorController(std::shared_ptr<kohzu::comm::ITcpClient> tcpClient,
+                                 std::shared_ptr<kohzu::protocol::Dispatcher> dispatcher)
+    : impl_(std::make_unique<Impl>(std::move(tcpClient), std::move(dispatcher))) {
 }
 
 MotorController::~MotorController() {
     try {
         stop();
     } catch (...) {
-        // destructor must not throw
-    }
-
-    // ensure worker stopped
-    callbackWorkerStopRequested_.store(true);
-    callbackQueueCv_.notify_one();
-    if (callbackWorkerThread_.joinable()) {
-        callbackWorkerThread_.join();
+        // swallow
     }
 }
 
-void MotorController::connect(const std::string& host, uint16_t port) {
-    comm_->connect(host, port);
-    writer_ = std::make_unique<kohzu::comm::Writer>(comm_->socket());
+void MotorController::start() {
+    // idempotent start
+    {
+        std::lock_guard<std::mutex> lk(impl_->cbMtx);
+        if (impl_->cbWorkerRunning) return;
+        impl_->stopRequested.store(false);
+        impl_->cbWorkerRunning = true;
+    }
+
+    // create writer (uses ITcpClient::sendLine)
+    if (!impl_->writer) {
+        impl_->writer = std::make_unique<kohzu::comm::Writer>(impl_->tcpClient, 1000);
+        impl_->writer->registerErrorHandler([this](std::exception_ptr ep){
+            try {
+                if (ep) std::rethrow_exception(ep);
+            } catch (const std::exception &e) {
+                std::cerr << "[MotorController::WriterError] " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[MotorController::WriterError] unknown exception\n";
+            }
+            impl_->dispatcher->cancelAllPendingWithException("Writer error: stopping motor controller");
+        });
+        impl_->writer->start();
+    }
+
+    // register tcp recv handler to feed Parser -> Dispatcher
+    impl_->tcpClient->registerRecvHandler([this](const std::string& line) {
+        // This runs in Asio io thread; keep it minimal
+        auto resp = kohzu::protocol::Parser::parse(line);
+        if (!resp.valid) {
+            std::cerr << "[MotorController] Parser invalid line: " << line << std::endl;
+            return;
+        }
+
+        // Build match key
+        std::string key = resp.cmd;
+        if (!resp.axis.empty()) key += ":" + resp.axis;
+
+        // Try to fulfill pending; if not matched, treat as spontaneous
+        bool matched = impl_->dispatcher->tryFulfill(key, resp);
+        if (!matched) {
+            impl_->dispatcher->notifySpontaneous(resp);
+        }
+    });
+
+    // start callback worker thread
+    impl_->cbWorkerThread = std::thread([this]() {
+        while (true) {
+            Impl::CallbackTask task;
+            {
+                std::unique_lock<std::mutex> lk(impl_->cbMtx);
+                impl_->cbCv.wait(lk, [this]() { return impl_->stopRequested.load() || !impl_->cbQueue.empty(); });
+                if (impl_->stopRequested.load() && impl_->cbQueue.empty()) break;
+                if (impl_->cbQueue.empty()) continue;
+                task = std::move(impl_->cbQueue.front());
+                impl_->cbQueue.pop_front();
+            }
+
+            // Wait for the future to be ready (blocking inside callback worker)
+            std::exception_ptr eptr = nullptr;
+            kohzu::protocol::Response resp;
+            try {
+                resp = task.fut.get(); // may throw if promise set_exception
+            } catch (...) {
+                eptr = std::current_exception();
+            }
+
+            // Call user callback (if provided) with resp or exception ptr
+            if (task.cb) {
+                try {
+                    task.cb(resp, eptr);
+                } catch (const std::exception& e) {
+                    std::cerr << "[MotorController] user async callback threw: " << e.what() << std::endl;
+                } catch (...) {
+                    std::cerr << "[MotorController] user async callback threw unknown exception\n";
+                }
+            }
+
+            // Regardless of callback success or exception, call onOperationFinish if axis >= 0
+            if (task.axis >= 0) {
+                if (impl_->onOperationFinish) {
+                    try {
+                        impl_->onOperationFinish(task.axis);
+                    } catch (...) {
+                        // swallow to avoid killing worker
+                        std::cerr << "[MotorController] onOperationFinish threw\n";
+                    }
+                }
+            }
+        } // end while
+
+        // mark worker not running
+        {
+            std::lock_guard<std::mutex> lk(impl_->cbMtx);
+            impl_->cbWorkerRunning = false;
+        }
+    });
 }
 
 void MotorController::stop() {
-    // First, cancel any pending responses so callers don't hang
+    // request stop for callback worker
+    impl_->stopRequested.store(true);
+    impl_->cbCv.notify_all();
+    if (impl_->cbWorkerThread.joinable()) {
+        impl_->cbWorkerThread.join();
+    }
+    {
+        std::lock_guard<std::mutex> lk(impl_->cbMtx);
+        impl_->cbWorkerRunning = false;
+    }
+
+    // stop writer
+    if (impl_->writer) {
+        impl_->writer->stop(true);
+        impl_->writer.reset();
+    }
+
+    // cancel pending in dispatcher
+    impl_->dispatcher->cancelAllPendingWithException("MotorController stopped");
+
+    // clear recv handler by registering empty handler
+    impl_->tcpClient->registerRecvHandler(nullptr);
+}
+
+void MotorController::connect(const std::string& host, uint16_t port) {
+    impl_->tcpClient->connect(host, port);
+}
+
+bool MotorController::isConnected() const noexcept {
+    return impl_->tcpClient->isConnected();
+}
+
+MotorController::Response MotorController::sendSync(const std::string& cmd,
+                                                    const std::vector<std::string>& params,
+                                                    std::chrono::milliseconds timeout) {
+    if (!impl_->writer) throw std::runtime_error("Writer not started; call start() before sendSync");
+
+    std::string key = Impl::makeKey(cmd, params);
+    auto fut = impl_->dispatcher->addPending(key);
+
+    std::string line = kohzu::protocol::CommandBuilder::makeCommand(cmd, params, false);
     try {
-        dispatcher_.cancelAllPendingWithException("MotorController stopping");
+        // use blocking enqueue
+        impl_->writer->enqueue(line);
     } catch (...) {
-        // swallow any exception
+        // enqueue failed -> remove pending and rethrow
+        impl_->dispatcher->removePendingWithException(key, "enqueue failed");
+        throw;
     }
 
-    // request callback worker stop and wake it
-    callbackWorkerStopRequested_.store(true);
-    callbackQueueCv_.notify_one();
-
-    if (writer_) {
-        writer_->stop();
-        writer_.reset();
-    }
-    if (comm_) {
-        comm_->close();
-    }
-
-    // join callback worker
-    if (callbackWorkerThread_.joinable()) {
-        callbackWorkerThread_.join();
-    }
-}
-
-std::string MotorController::makeMatchKey(const std::string& cmd, const std::vector<std::string>& params) {
-    std::string key = cmd;
-    if (!params.empty() && !params[0].empty()) {
-        key += ":";
-        key += params[0];
-    }
-    return key;
-}
-
-void MotorController::registerSpontaneousHandler(kohzu::protocol::SpontaneousHandler handler) {
-    dispatcher_.registerSpontaneousHandler(std::move(handler));
-}
-
-void MotorController::onLineReceived(const std::string& line) {
-    kp::Response resp = kp::Parser::parse(line);
-
-    if (!resp.valid) {
-        std::cerr << "Parser: invalid/malformed response received. raw=\"" << line << "\"\n";
-        return;
-    }
-
-    if (resp.cmd == "SYS") {
-        dispatcher_.notifySpontaneous(resp);
-        return;
-    }
-
-    std::string key;
-    if (!resp.axis.empty()) {
-        key = resp.cmd + ":" + resp.axis;
+    // wait for response with timeout
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        return fut.get();
     } else {
-        key = resp.cmd;
-    }
-
-    if (!dispatcher_.tryFulfill(key, resp)) {
-        dispatcher_.notifySpontaneous(resp);
-    }
-}
-
-std::future<kp::Response> MotorController::sendAsync(const std::string& cmd, const std::vector<std::string>& params) {
-    if (!writer_) {
-        throw std::runtime_error("Writer not initialized; call connect first");
-    }
-    std::string matchKey = MotorController::makeMatchKey(cmd, params);
-    std::future<kp::Response> future = dispatcher_.addPending(matchKey);
-
-    std::string cmdLine = kp::CommandBuilder::makeCommand(cmd, params, false);
-    try {
-        writer_->enqueue(cmdLine);
-    } catch (const std::exception& e) {
-        dispatcher_.removePendingWithException(matchKey, std::string("enqueue failed: ") + e.what());
-        throw;
-    }
-
-    return future;
-}
-
-// NEW: callback-style sendAsync
-void MotorController::sendAsync(const std::string& cmd, const std::vector<std::string>& params, AsyncCallback callback) {
-    if (!writer_) {
-        throw std::runtime_error("Writer not initialized; call connect first");
-    }
-    if (!callback) {
-        throw std::invalid_argument("callback is empty");
-    }
-
-    std::string matchKey = MotorController::makeMatchKey(cmd, params);
-    std::future<kp::Response> future = dispatcher_.addPending(matchKey);
-
-    std::string cmdLine = kp::CommandBuilder::makeCommand(cmd, params, false);
-    try {
-        writer_->enqueue(cmdLine);
-    } catch (const std::exception& e) {
-        dispatcher_.removePendingWithException(matchKey, std::string("enqueue failed: ") + e.what());
-        throw;
-    }
-
-    // push task to callback queue
-    CallbackTask task{ std::move(future), std::move(callback) };
-    pushCallbackTask(std::move(task));
-}
-
-kp::Response MotorController::sendSync(const std::string& cmd, const std::vector<std::string>& params,
-                                       std::chrono::milliseconds timeout) {
-    if (!writer_) {
-        throw std::runtime_error("Writer not initialized; call connect first");
-    }
-
-    std::string matchKey = MotorController::makeMatchKey(cmd, params);
-    std::future<kp::Response> future = dispatcher_.addPending(matchKey);
-
-    std::string cmdLine = kp::CommandBuilder::makeCommand(cmd, params, false);
-
-    try {
-        writer_->enqueue(cmdLine);
-    } catch (const std::exception& e) {
-        dispatcher_.removePendingWithException(matchKey, std::string("enqueue failed: ") + e.what());
-        throw;
-    }
-
-    if (future.wait_for(timeout) == std::future_status::ready) {
-        kp::Response resp = future.get();
-        return resp;
-    } else {
-        dispatcher_.removePendingWithException(matchKey, std::string("timeout waiting for response"));
+        // timeout: remove pending and throw
+        impl_->dispatcher->removePendingWithException(key, "timeout waiting for response");
         throw std::runtime_error("timeout waiting for response");
     }
 }
 
-// helper to push task into queue
-void MotorController::pushCallbackTask(CallbackTask&& task) {
-    {
-        std::lock_guard<std::mutex> lk(callbackQueueMutex_);
-        callbackQueue_.push_back(std::move(task));
+std::future<MotorController::Response> MotorController::sendAsync(const std::string& cmd,
+                                                                  const std::vector<std::string>& params) {
+    if (!impl_->writer) throw std::runtime_error("Writer not started; call start() before sendAsync");
+
+    std::string key = Impl::makeKey(cmd, params);
+    auto fut = impl_->dispatcher->addPending(key);
+
+    std::string line = kohzu::protocol::CommandBuilder::makeCommand(cmd, params, false);
+    // non-throwing tryEnqueue fallback: if queue full, throw
+    try {
+        impl_->writer->enqueue(line);
+    } catch (...) {
+        impl_->dispatcher->removePendingWithException(key, "enqueue failed");
+        throw;
     }
-    callbackQueueCv_.notify_one();
+
+    return fut;
 }
 
-// worker loop implementation
-void MotorController::callbackWorkerLoop() {
-    using namespace std::chrono_literals;
+void MotorController::sendAsync(const std::string& cmd,
+                                const std::vector<std::string>& params,
+                                AsyncCallback cb) {
+    if (!impl_->writer) throw std::runtime_error("Writer not started; call start() before sendAsync");
 
-    while (!callbackWorkerStopRequested_.load()) {
-        CallbackTask task;
-        bool haveTask = false;
+    std::string key = Impl::makeKey(cmd, params);
+    auto fut = impl_->dispatcher->addPending(key);
 
-        {
-            std::unique_lock<std::mutex> lk(callbackQueueMutex_);
-            if (callbackQueue_.empty()) {
-                // wait until new task or stop requested
-                callbackQueueCv_.wait_for(lk, 200ms, [this]() {
-                    return !callbackQueue_.empty() || callbackWorkerStopRequested_.load();
-                });
-            }
-
-            if (!callbackQueue_.empty()) {
-                task = std::move(callbackQueue_.front());
-                callbackQueue_.pop_front();
-                haveTask = true;
-            }
+    std::string line = kohzu::protocol::CommandBuilder::makeCommand(cmd, params, false);
+    try {
+        impl_->writer->enqueue(line);
+    } catch (...) {
+        impl_->dispatcher->removePendingWithException(key, "enqueue failed");
+        if (cb) {
+            cb(Response{}, std::make_exception_ptr(std::runtime_error("enqueue failed")));
         }
-
-        if (!haveTask) {
-            continue; // check stop flag and loop
-        }
-
-        // Wait for the future to become ready, but poll periodically so we can respond to stop request.
-        std::future<kp::Response>& fut = task.fut;
-        while (!callbackWorkerStopRequested_.load()) {
-            if (fut.wait_for(100ms) == std::future_status::ready) {
-                // ready -> process it
-                try {
-                    kp::Response resp = fut.get();
-                    try {
-                        task.cb(resp, nullptr);
-                    } catch (...) {
-                        // swallow exceptions from callback
-                    }
-                } catch (...) {
-                    // future.get() threw -> pass exception to callback
-                    std::exception_ptr ep = std::current_exception();
-                    try {
-                        task.cb(kp::Response(), ep);
-                    } catch (...) {
-                        // swallow
-                    }
-                }
-                break;
-            }
-            // else not ready -> loop and check stop flag
-        }
-
-        // if stop requested and future not ready, skip calling callback (pending should have been canceled by dispatcher)
+        return;
     }
 
-    // On exit, optionally process remaining tasks by signaling exception
-    // (but dispatcher.cancelAllPendingWithException is expected to have been called on stop())
-    std::deque<CallbackTask> remaining;
+    // If command looks like a movement command, call onOperationStart
+    int axis = Impl::parseAxisFromParams(params);
+    if (impl_->movementCommands.count(cmd) && axis >= 0) {
+        if (impl_->onOperationStart) {
+            try { impl_->onOperationStart(axis); } catch (...) { /* swallow */ }
+        }
+    }
+
+    // push to callback queue
     {
-        std::lock_guard<std::mutex> lk(callbackQueueMutex_);
-        remaining.swap(callbackQueue_);
+        std::lock_guard<std::mutex> lk(impl_->cbMtx);
+        impl_->cbQueue.push_back(Impl::CallbackTask{std::move(fut), cb, key, axis});
     }
-    for (auto &task : remaining) {
-        try {
-            // try to get if ready
-            if (task.fut.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-                try {
-                    kp::Response resp = task.fut.get();
-                    task.cb(resp, nullptr);
-                } catch (...) {
-                    task.cb(kp::Response(), std::current_exception());
-                }
-            } else {
-                // not ready -> signal error
-                task.cb(kp::Response(), std::make_exception_ptr(std::runtime_error("MotorController stopping; task canceled")));
-            }
-        } catch (...) {
-            // swallow
-        }
-    }
+    impl_->cbCv.notify_one();
 }
 
+void MotorController::registerSpontaneousHandler(SpontaneousHandler h) {
+    impl_->dispatcher->registerSpontaneousHandler(std::move(h));
+}
+
+void MotorController::registerOperationCallbacks(OperationCallback onStart, OperationCallback onFinish) {
+    impl_->onOperationStart = std::move(onStart);
+    impl_->onOperationFinish = std::move(onFinish);
+}
+
+} // namespace kohzu::controller

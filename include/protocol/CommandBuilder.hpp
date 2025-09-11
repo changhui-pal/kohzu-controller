@@ -34,4 +34,3 @@ struct CommandBuilder {
 };
 
 } // namespace kohzu::protocol
-

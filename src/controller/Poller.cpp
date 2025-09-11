@@ -1,27 +1,27 @@
 // src/controller/Poller.cpp
-
 #include "controller/Poller.hpp"
-#include "protocol/Parser.hpp"
 
-#include <chrono>
 #include <iostream>
 #include <sstream>
+#include <string>
+#include <algorithm>
 
-using namespace kohzu::controller;
-namespace kp = kohzu::protocol;
+namespace kohzu::controller {
 
-static std::string axisToStr(int axis) {
-    return std::to_string(axis);
-}
-
-static std::string makeKey(const std::string& cmd, int axis) {
-    return cmd + ":" + std::to_string(axis);
-}
-
-Poller::Poller(std::shared_ptr<MotorController> motorCtrl,
-               std::vector<int> axes,
-               std::chrono::milliseconds interval)
-    : motorCtrl_(std::move(motorCtrl)), interval_(interval), axes_(std::move(axes)) {
+Poller::Poller(std::shared_ptr<MotorController> motor,
+               std::shared_ptr<StateCache> cache,
+               const std::vector<int>& axes,
+               ms pollInterval,
+               ms fastPollInterval)
+    : motor_(std::move(motor)),
+      cache_(std::move(cache)),
+      axesOrder_(axes),
+      pollInterval_(pollInterval),
+      fastPollInterval_(fastPollInterval) {
+    // initialize lastPolled_ timestamps to epoch 0
+    auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(axesMtx_);
+    for (int a : axesOrder_) lastPolled_[a] = now - pollInterval_;
 }
 
 Poller::~Poller() {
@@ -29,126 +29,244 @@ Poller::~Poller() {
 }
 
 void Poller::start() {
-    bool expected = false;
-    if (!running_.compare_exchange_strong(expected, true)) {
-        return; // already running
-    }
-    worker_ = std::thread([this]() { run(); });
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (running_) return;
+    running_ = true;
+    worker_ = std::thread(&Poller::runLoop, this);
 }
 
 void Poller::stop() {
-    bool expected = true;
-    if (!running_.compare_exchange_strong(expected, false)) {
-        return; // already stopped
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (!running_) return;
+        running_ = false;
     }
+    cv_.notify_all();
     if (worker_.joinable()) worker_.join();
 
-    // clear inflight (best-effort - let futures destruct)
+    // clear inflight futures map
     {
-        std::lock_guard<std::mutex> lk(inflightMutex_);
-        inflight_.clear();
+        std::lock_guard<std::mutex> lk(inflightMtx_);
+        inflightRdp_.clear();
     }
 }
 
 void Poller::setAxes(const std::vector<int>& axes) {
-    std::lock_guard<std::mutex> lk(axesMutex_);
-    axes_ = axes;
-}
-
-void Poller::run() {
-    using namespace std::chrono;
-    const milliseconds zero(0);
-
-    while (running_.load()) {
-        // copy axis list
-        std::vector<int> axesCopy;
-        {
-            std::lock_guard<std::mutex> lk(axesMutex_);
-            axesCopy = axes_;
-        }
-
-        // 1) Send requests for axes that don't have inflight requests
-        for (int axis : axesCopy) {
-            // RDP (position)
-            {
-                std::string key = makeKey("RDP", axis);
-                std::lock_guard<std::mutex> lk(inflightMutex_);
-                if (inflight_.find(key) == inflight_.end()) {
-                    try {
-                        // sendAsync returns future; store it
-                        auto fut = motorCtrl_->sendAsync("RDP", { axisToStr(axis) });
-                        inflight_.emplace(key, std::move(fut));
-                    } catch (const std::exception& e) {
-                        std::cerr << "Poller: sendAsync RDP failed axis=" << axis << " : " << e.what() << "\n";
-                    }
-                }
-            }
-
-            // STR (status)
-            {
-                std::string key = makeKey("STR", axis);
-                std::lock_guard<std::mutex> lk(inflightMutex_);
-                if (inflight_.find(key) == inflight_.end()) {
-                    try {
-                        auto fut = motorCtrl_->sendAsync("STR", { axisToStr(axis) });
-                        inflight_.emplace(key, std::move(fut));
-                    } catch (const std::exception& e) {
-                        std::cerr << "Poller: sendAsync STR failed axis=" << axis << " : " << e.what() << "\n";
-                    }
-                }
-            }
-        }
-
-        // 2) Check inflight futures for readiness (non-blocking) and process
-        {
-            std::lock_guard<std::mutex> lk(inflightMutex_);
-            for (auto it = inflight_.begin(); it != inflight_.end(); ) {
-                std::future<kp::Response>& f = it->second;
-                if (f.wait_for(zero) == std::future_status::ready) {
-                    try {
-                        kp::Response resp = f.get();
-                        // parse axis from resp.axis (parser already sets it)
-                        int axisNum = 0;
-                        if (!resp.axis.empty()) {
-                            axisNum = std::stoi(resp.axis);
-                        }
-
-                        if (resp.cmd == "RDP") {
-                            // params[0] contains motor pulse value per manual
-                            if (!resp.params.empty()) {
-                                try {
-                                    std::int64_t pos = std::stoll(resp.params[0]);
-                                    cache_.updatePosition(axisNum, pos, resp.raw);
-                                } catch (...) {
-                                    // ignore parse error
-                                }
-                            }
-                        } else if (resp.cmd == "STR") {
-                            // params[0] is driving state: 0 stopped, 1 operating, 2 feedback operating
-                            if (!resp.params.empty()) {
-                                try {
-                                    int drv = std::stoi(resp.params[0]);
-                                    bool running = (drv != 0);
-                                    cache_.updateRunning(axisNum, running, resp.raw);
-                                } catch (...) {
-                                    // ignore parse error
-                                }
-                            }
-                        } else {
-                            // other responses - ignore here (or could update raw)
-                        }
-                    } catch (const std::exception& e) {
-                        std::cerr << "Poller: future.get threw: " << e.what() << "\n";
-                    }
-                    it = inflight_.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
-
-        // sleep a bit (interval_) before next round
-        std::this_thread::sleep_for(interval_);
+    std::lock_guard<std::mutex> lk(axesMtx_);
+    axesOrder_ = axes;
+    auto now = std::chrono::steady_clock::now();
+    for (int a : axesOrder_) {
+        if (lastPolled_.find(a) == lastPolled_.end()) lastPolled_[a] = now - pollInterval_;
     }
 }
 
+void Poller::addAxis(int axis) {
+    std::lock_guard<std::mutex> lk(axesMtx_);
+    if (std::find(axesOrder_.begin(), axesOrder_.end(), axis) == axesOrder_.end()) {
+        axesOrder_.push_back(axis);
+        lastPolled_[axis] = std::chrono::steady_clock::now() - pollInterval_;
+    }
+}
+
+void Poller::removeAxis(int axis) {
+    {
+        std::lock_guard<std::mutex> lk(axesMtx_);
+        axesOrder_.erase(std::remove(axesOrder_.begin(), axesOrder_.end(), axis), axesOrder_.end());
+        lastPolled_.erase(axis);
+    }
+    {
+        std::lock_guard<std::mutex> lk(inflightMtx_);
+        inflightRdp_.erase(axis);
+    }
+    {
+        std::lock_guard<std::mutex> lk(activeMtx_);
+        activeAxes_.erase(axis);
+    }
+}
+
+void Poller::notifyOperationStarted(int axis) {
+    {
+        std::lock_guard<std::mutex> lk(activeMtx_);
+        activeAxes_.insert(axis);
+    }
+    // schedule an immediate RDP for start position
+    scheduleRdp(axis);
+    cv_.notify_all();
+}
+
+void Poller::notifyOperationFinished(int axis) {
+    {
+        std::lock_guard<std::mutex> lk(activeMtx_);
+        activeAxes_.erase(axis);
+    }
+
+    // perform final synchronous reads for guaranteed final position/status
+    try {
+        // RDP: absolute position
+        auto rdpResp = motor_->sendSync("RDP", { std::to_string(axis) }, std::chrono::milliseconds(5000));
+        if (rdpResp.valid && !rdpResp.params.empty()) {
+            try {
+                long pos = std::stol(rdpResp.params[0]);
+                cache_->updatePosition(axis, pos);
+            } catch (...) {
+                // store raw if cannot parse
+                cache_->updateRaw(axis, rdpResp.raw);
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[Poller] notifyOperationFinished: RDP failed for axis " << axis << " : " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "[Poller] notifyOperationFinished: RDP unknown error for axis " << axis << std::endl;
+    }
+
+    try {
+        // STR: status (running flag etc.)
+        auto strResp = motor_->sendSync("STR", { std::to_string(axis) }, std::chrono::milliseconds(2000));
+        if (strResp.valid && !strResp.params.empty()) {
+            // interpret first param as running flag '1' or '0' if applicable
+            bool running = false;
+            try {
+                running = (std::stol(strResp.params[0]) != 0);
+            } catch (...) {
+                // leave running as false if parse fails
+            }
+            cache_->updateRunning(axis, running);
+            cache_->updateRaw(axis, strResp.raw);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[Poller] notifyOperationFinished: STR failed for axis " << axis << " : " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "[Poller] notifyOperationFinished: STR unknown error for axis " << axis << std::endl;
+    }
+
+    // ensure we don't leave any inflight RDP for this axis
+    {
+        std::lock_guard<std::mutex> lk(inflightMtx_);
+        inflightRdp_.erase(axis);
+    }
+}
+
+void Poller::scheduleRdp(int axis) {
+    // if already inflight, skip
+    {
+        std::lock_guard<std::mutex> lk(inflightMtx_);
+        if (inflightRdp_.count(axis)) return;
+    }
+
+    try {
+        // sendAsync returns future<Response>
+        auto fut = motor_->sendAsync("RDP", { std::to_string(axis) });
+        std::lock_guard<std::mutex> lk(inflightMtx_);
+        inflightRdp_.emplace(axis, std::move(fut));
+    } catch (const std::exception& e) {
+        std::cerr << "[Poller] scheduleRdp: sendAsync failed for axis " << axis << " : " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "[Poller] scheduleRdp: unknown error for axis " << axis << std::endl;
+    }
+}
+
+void Poller::handleCompletedInflight() {
+    std::vector<int> finished;
+    // snapshot keys to check
+    {
+        std::lock_guard<std::mutex> lk(inflightMtx_);
+        for (auto &kv : inflightRdp_) {
+            int axis = kv.first;
+            auto &fut = kv.second;
+            if (fut.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                finished.push_back(axis);
+            }
+        }
+    }
+
+    for (int axis : finished) {
+        std::future<kohzu::protocol::Response> fut;
+        {
+            std::lock_guard<std::mutex> lk(inflightMtx_);
+            auto it = inflightRdp_.find(axis);
+            if (it == inflightRdp_.end()) continue;
+            fut = std::move(it->second);
+            inflightRdp_.erase(it);
+        }
+
+        try {
+            auto resp = fut.get(); // may throw if set_exception
+            if (!resp.valid) {
+                std::cerr << "[Poller] invalid RDP response axis " << axis << " raw=" << resp.raw << std::endl;
+                continue;
+            }
+            // RDP expected param[0] = position
+            if (!resp.params.empty()) {
+                try {
+                    long pos = std::stol(resp.params[0]);
+                    cache_->updatePosition(axis, pos);
+                } catch (...) {
+                    cache_->updateRaw(axis, resp.raw);
+                }
+            } else {
+                cache_->updateRaw(axis, resp.raw);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[Poller] inflight future.get() exception for axis " << axis << " : " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[Poller] inflight future.get() unknown exception for axis " << axis << std::endl;
+        }
+    }
+}
+
+void Poller::runLoop() {
+    auto nextWake = std::chrono::steady_clock::now();
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lk(mtx_);
+            if (!running_) break;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+
+        // 1) handle any completed inflight futures
+        handleCompletedInflight();
+
+        // 2) schedule new RDPs when due
+        std::vector<int> axesCopy;
+        {
+            std::lock_guard<std::mutex> lk(axesMtx_);
+            axesCopy = axesOrder_;
+        }
+
+        for (int axis : axesCopy) {
+            // determine desired interval for this axis
+            bool isActive = false;
+            {
+                std::lock_guard<std::mutex> lk(activeMtx_);
+                isActive = (activeAxes_.find(axis) != activeAxes_.end());
+            }
+            ms desired = isActive ? fastPollInterval_ : pollInterval_;
+
+            auto lastIt = lastPolled_.find(axis);
+            auto last = (lastIt != lastPolled_.end()) ? lastIt->second : (now - desired);
+            if (now - last >= desired) {
+                // schedule if not already inflight
+                {
+                    std::lock_guard<std::mutex> lk(inflightMtx_);
+                    if (inflightRdp_.count(axis) == 0) {
+                        scheduleRdp(axis);
+                        // update lastPolled to avoid immediate re-schedule (even if schedule failed we set it)
+                        lastPolled_[axis] = now;
+                    } else {
+                        // if inflight, skip scheduling; lastPolled remains old so we'll retry after interval
+                    }
+                }
+            }
+        }
+
+        // sleep a short while (responsiveness tick)
+        std::unique_lock<std::mutex> lk(mtx_);
+        cv_.wait_for(lk, std::chrono::milliseconds(50), [this]() { return !running_; });
+    }
+
+    // final: handle any remaining inflight
+    handleCompletedInflight();
+}
+
+} // namespace kohzu::controller

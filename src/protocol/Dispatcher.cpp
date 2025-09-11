@@ -1,89 +1,133 @@
 // src/protocol/Dispatcher.cpp
-
 #include "protocol/Dispatcher.hpp"
+#include "protocol/Parser.hpp" // for Response type
 
-#include <stdexcept>
+#include <chrono>
+#include <exception>
+#include <future>
+#include <iostream>
 
 namespace kohzu::protocol {
 
+Dispatcher::Dispatcher() = default;
+
 Dispatcher::~Dispatcher() {
-    // On destruction, ensure pending promises are completed with an exception
-    cancelAllPendingWithException("Dispatcher destroyed");
+    cancelAllPendingWithException("Dispatcher shutting down");
 }
 
 std::future<Response> Dispatcher::addPending(const std::string& key) {
-    std::lock_guard<std::mutex> lock(pendingMutex_);
-    std::promise<Response> promise;
-    std::future<Response> future = promise.get_future();
-    // emplace may move the promise; to avoid invalidating our local, move into map directly
-    pendingMap_.emplace(key, std::move(promise));
-    return future;
+    std::promise<Response> prom;
+    auto fut = prom.get_future();
+
+    std::lock_guard<std::mutex> lk(mtx_);
+    // insert only if not existing
+    if (pending_.count(key)) {
+        // existing pending for same key: this may indicate misuse; still create a new entry with unique suffix?
+        // For simplicity, we return the new future but log warning.
+        std::cerr << "[Dispatcher] Warning: addPending called for existing key: " << key << std::endl;
+    }
+    pending_.emplace(key, std::move(prom));
+    return fut;
 }
 
 bool Dispatcher::tryFulfill(const std::string& key, const Response& response) {
-    std::lock_guard<std::mutex> lock(pendingMutex_);
-    auto it = pendingMap_.find(key);
-    if (it != pendingMap_.end()) {
-        try {
-            it->second.set_value(response);
-        } catch (...) {
-            // swallow exceptions from set_value
+    std::promise<Response> prom;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = pending_.find(key);
+        if (it == pending_.end()) {
+            return false;
         }
-        pendingMap_.erase(it);
-        return true;
+        // move promise out
+        prom = std::move(it->second);
+        pending_.erase(it);
     }
-    return false;
+    try {
+        prom.set_value(response);
+    } catch (const std::future_error& fe) {
+        std::cerr << "[Dispatcher] set_value future_error: " << fe.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cerr << "[Dispatcher] set_value unknown exception\n";
+        return false;
+    }
+    return true;
 }
 
 void Dispatcher::removePendingWithException(const std::string& key, const std::string& message) {
-    std::lock_guard<std::mutex> lock(pendingMutex_);
-    auto it = pendingMap_.find(key);
-    if (it != pendingMap_.end()) {
-        try {
-            it->second.set_exception(std::make_exception_ptr(std::runtime_error(message)));
-        } catch (...) {
-            // ignore
+    std::promise<Response> prom;
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = pending_.find(key);
+        if (it != pending_.end()) {
+            prom = std::move(it->second);
+            pending_.erase(it);
+            found = true;
         }
-        pendingMap_.erase(it);
     }
-}
-
-void Dispatcher::cancelPending(const std::string& key) {
-    std::lock_guard<std::mutex> lock(pendingMutex_);
-    pendingMap_.erase(key);
+    if (found) {
+        try {
+            prom.set_exception(std::make_exception_ptr(std::runtime_error(message)));
+        } catch (const std::future_error& fe) {
+            std::cerr << "[Dispatcher] set_exception future_error: " << fe.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[Dispatcher] set_exception unknown exception\n";
+        }
+    }
 }
 
 void Dispatcher::cancelAllPendingWithException(const std::string& message) {
-    std::lock_guard<std::mutex> lock(pendingMutex_);
-    for (auto &kv : pendingMap_) {
+    std::vector<std::promise<Response>> toCancel;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        for (auto &kv : pending_) {
+            toCancel.push_back(std::move(kv.second));
+        }
+        pending_.clear();
+    }
+
+    for (auto &prom : toCancel) {
         try {
-            kv.second.set_exception(std::make_exception_ptr(std::runtime_error(message)));
+            prom.set_exception(std::make_exception_ptr(std::runtime_error(message)));
+        } catch (const std::future_error& fe) {
+            std::cerr << "[Dispatcher] set_exception future_error during cancelAll: " << fe.what() << std::endl;
         } catch (...) {
-            // ignore
+            std::cerr << "[Dispatcher] set_exception unknown exception during cancelAll\n";
         }
     }
-    pendingMap_.clear();
 }
 
-void Dispatcher::registerSpontaneousHandler(SpontaneousHandler handler) {
-    std::lock_guard<std::mutex> lock(handlerMutex_);
-    spontaneousHandlers_.push_back(std::move(handler));
+void Dispatcher::registerSpontaneousHandler(SpontaneousHandler h) {
+    std::lock_guard<std::mutex> lk(handlerMtx_);
+    spontaneousHandlers_.push_back(std::move(h));
 }
 
-void Dispatcher::notifySpontaneous(const Response& response) {
-    std::vector<SpontaneousHandler> handlersCopy;
+void Dispatcher::notifySpontaneous(const Response& resp) {
+    // Copy handlers under lock then invoke them asynchronously (std::async)
+    std::vector<SpontaneousHandler> handlers;
     {
-        std::lock_guard<std::mutex> lock(handlerMutex_);
-        handlersCopy = spontaneousHandlers_;
+        std::lock_guard<std::mutex> lk(handlerMtx_);
+        handlers = spontaneousHandlers_;
     }
-    for (std::size_t i = 0; i < handlersCopy.size(); ++i) {
+    for (auto &h : handlers) {
         try {
-            handlersCopy[i](response);
+            // launch detached async to avoid blocking caller (which is usually io thread)
+            std::async(std::launch::async, [h, resp]() {
+                try {
+                    h(resp);
+                } catch (const std::exception& ex) {
+                    std::cerr << "[Dispatcher] spontaneous handler threw: " << ex.what() << std::endl;
+                } catch (...) {
+                    std::cerr << "[Dispatcher] spontaneous handler threw unknown exception" << std::endl;
+                }
+            });
+        } catch (const std::exception& ex) {
+            std::cerr << "[Dispatcher] failed to launch async spontaneous handler: " << ex.what() << std::endl;
         } catch (...) {
-            // swallow
+            std::cerr << "[Dispatcher] failed to launch async spontaneous handler (unknown)\n";
         }
     }
 }
 
 } // namespace kohzu::protocol
-
