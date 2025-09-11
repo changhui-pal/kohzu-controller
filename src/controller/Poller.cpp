@@ -154,10 +154,10 @@ void Poller::scheduleRdp(int axis) {
     }
 
     try {
-        // sendAsync returns future<Response>
+        // sendAsync returns std::future<Response>, convert to shared_future via .share()
         auto fut = motor_->sendAsync("RDP", { std::to_string(axis) });
         std::lock_guard<std::mutex> lk(inflightMtx_);
-        inflightRdp_.emplace(axis, std::move(fut));
+        inflightRdp_.emplace(axis, fut.share());
     } catch (const std::exception& e) {
         std::cerr << "[Poller] scheduleRdp: sendAsync failed for axis " << axis << " : " << e.what() << std::endl;
     } catch (...) {
@@ -172,25 +172,25 @@ void Poller::handleCompletedInflight() {
         std::lock_guard<std::mutex> lk(inflightMtx_);
         for (auto &kv : inflightRdp_) {
             int axis = kv.first;
-            auto &fut = kv.second;
-            if (fut.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            auto &sf = kv.second;
+            if (sf.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
                 finished.push_back(axis);
             }
         }
     }
 
     for (int axis : finished) {
-        std::future<kohzu::protocol::Response> fut;
+        std::shared_future<kohzu::protocol::Response> sf;
         {
             std::lock_guard<std::mutex> lk(inflightMtx_);
             auto it = inflightRdp_.find(axis);
             if (it == inflightRdp_.end()) continue;
-            fut = std::move(it->second);
+            sf = it->second;
             inflightRdp_.erase(it);
         }
 
         try {
-            auto resp = fut.get(); // may throw if set_exception
+            auto resp = sf.get(); // may throw if set_exception
             if (!resp.valid) {
                 std::cerr << "[Poller] invalid RDP response axis " << axis << " raw=" << resp.raw << std::endl;
                 continue;
@@ -215,14 +215,11 @@ void Poller::handleCompletedInflight() {
 }
 
 void Poller::runLoop() {
-    auto nextWake = std::chrono::steady_clock::now();
     while (true) {
         {
             std::unique_lock<std::mutex> lk(mtx_);
             if (!running_) break;
         }
-
-        auto now = std::chrono::steady_clock::now();
 
         // 1) handle any completed inflight futures
         handleCompletedInflight();
@@ -234,6 +231,7 @@ void Poller::runLoop() {
             axesCopy = axesOrder_;
         }
 
+        auto now = std::chrono::steady_clock::now();
         for (int axis : axesCopy) {
             // determine desired interval for this axis
             bool isActive = false;
@@ -253,8 +251,6 @@ void Poller::runLoop() {
                         scheduleRdp(axis);
                         // update lastPolled to avoid immediate re-schedule (even if schedule failed we set it)
                         lastPolled_[axis] = now;
-                    } else {
-                        // if inflight, skip scheduling; lastPolled remains old so we'll retry after interval
                     }
                 }
             }
