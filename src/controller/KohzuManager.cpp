@@ -67,6 +67,20 @@ bool KohzuManager::connectOnce() {
         tcpClient_ = std::make_shared<kohzu::comm::AsioTcpClient>();
         dispatcher_ = std::make_shared<kohzu::protocol::Dispatcher>();
 
+        // Register onDisconnect callback so that when TCP disconnects we cancel pending dispatcher entries.
+        // This prevents indefinitely waiting futures and helps with graceful recovery.
+        try {
+            tcpClient_->setOnDisconnect([dispatcher = dispatcher_]() {
+                try {
+                    if (dispatcher) dispatcher->cancelAllPendingWithException("TCP disconnected");
+                } catch (...) {
+                    // swallow: best-effort cancellation
+                }
+            });
+        } catch (...) {
+            // If setOnDisconnect not supported, continue without it (but ideally interface provides it).
+        }
+
         // create motor controller
         controller_ = std::make_shared<MotorController>(tcpClient_, dispatcher_);
 
@@ -103,6 +117,7 @@ bool KohzuManager::connectOnce() {
         return false;
     }
 }
+
 
 bool KohzuManager::isRunning() const noexcept {
     return running_.load();
