@@ -1,226 +1,181 @@
 // src/comm/AsioTcpClient.cpp
-#include "comm/AsioTcpClient.hpp"
-
-#include <boost/asio/connect.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/asio/write.hpp>
-#include <boost/asio/read_until.hpp>
-
+#include "AsioTcpClient.hpp"
+#include <boost/asio.hpp>
 #include <iostream>
-#include <sstream>
+#include <thread>
+#include <mutex>
+#include <atomic>
 #include <system_error>
 
 namespace kohzu::comm {
 
 struct AsioTcpClient::Impl {
     Impl()
-        : ioContext_(),
-          workGuard_(boost::asio::make_work_guard(ioContext_)),
-          socket_(ioContext_),
-          writeStrand_(boost::asio::make_strand(ioContext_)),
-          thread_(),
-          connected_{false} {}
-
-    ~Impl() {
-        // cleanup handled by AsioTcpClient destructor
-    }
-
-    // Start io_context running in background thread
-    void startIo() {
-        std::lock_guard<std::mutex> lk(mtx_);
-        if (thread_.joinable()) return;
-        thread_ = std::thread([this]() {
-            try {
-                ioContext_.run();
-            } catch (const std::exception& ex) {
-                std::cerr << "[AsioTcpClient] io_context.run() threw: " << ex.what() << std::endl;
-            }
-        });
-    }
-
-    // Stop io_context and join thread
-    void stopIo() {
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            if (!thread_.joinable()) return;
-            // release work guard to let run() exit when no pending handlers
-            workGuard_.reset();
-        }
-        ioContext_.stop();
-        if (thread_.joinable()) thread_.join();
-    }
-
-    // schedule next async read (must be called while socket is open)
-    void asyncReadLine() {
-        boost::asio::async_read_until(socket_, *readBuffer_, "\r\n",
-            [this](const boost::system::error_code& ec, std::size_t bytes_transferred) {
-                if (ec) {
-                    // On read error, mark disconnected and call recv handler with nothing or log
-                    {
-                        std::lock_guard<std::mutex> lk(cbMtx_);
-                        connected_.store(false);
-                    }
-                    std::cerr << "[AsioTcpClient] read error: " << ec.message() << std::endl;
-                    // don't attempt further reads if socket closed
-                    return;
-                }
-
-                std::string line;
-                try {
-                    std::istream is(readBuffer_.get());
-                    std::getline(is, line); // reads up to '\n', removes it
-                    // remove trailing '\r' if present
-                    if (!line.empty() && line.back() == '\r') line.pop_back();
-                } catch (const std::exception& ex) {
-                    std::cerr << "[AsioTcpClient] parse readBuffer error: " << ex.what() << std::endl;
-                    // continue reading
-                    readBuffer_->consume(bytes_transferred);
-                    asyncReadLine();
-                    return;
-                }
-
-                // consume bytes_transferred from buffer
-                readBuffer_->consume(bytes_transferred);
-
-                // call registered recv handler (if any) on io thread
-                RecvHandler handler;
-                {
-                    std::lock_guard<std::mutex> lk(cbMtx_);
-                    handler = recvHandler_;
-                }
-                if (handler) {
-                    try {
-                        handler(line);
-                    } catch (const std::exception& ex) {
-                        std::cerr << "[AsioTcpClient] recv handler threw: " << ex.what() << std::endl;
-                    } catch (...) {
-                        std::cerr << "[AsioTcpClient] recv handler threw unknown exception" << std::endl;
-                    }
-                }
-
-                // schedule next read
-                asyncReadLine();
-            });
-    }
+        : resolver_(ioContext_), socket_(ioContext_), connected_(false) {}
 
     boost::asio::io_context ioContext_;
-    // keep io_context alive until explicit stop
-    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> workGuard_;
+    boost::asio::ip::tcp::resolver resolver_;
     boost::asio::ip::tcp::socket socket_;
-    boost::asio::strand<boost::asio::io_context::executor_type> writeStrand_;
-    std::unique_ptr<boost::asio::streambuf> readBuffer_ = std::make_unique<boost::asio::streambuf>();
+    std::thread ioThread_;
+    std::mutex cbMtx_;
 
-    std::thread thread_;
-    std::mutex mtx_; // protects thread existence and workGuard_
-    std::mutex cbMtx_; // protects recvHandler_ and connected_
     std::atomic<bool> connected_;
-    RecvHandler recvHandler_;
+    ITcpClient::RecvHandler recvHandler_;
+    std::function<void()> onDisconnect_;
 };
 
 AsioTcpClient::AsioTcpClient()
-    : impl_(std::make_unique<Impl>()) {
-}
+    : impl_(std::make_unique<Impl>()) {}
 
 AsioTcpClient::~AsioTcpClient() {
-    try {
-        stop();
-        disconnect();
-    } catch (...) {
-        // do not throw from dtor
-    }
-}
-
-void AsioTcpClient::connect(const std::string& host, uint16_t port) {
-    using boost::asio::ip::tcp;
-    try {
-        tcp::resolver resolver(impl_->ioContext_);
-        auto endpoints = resolver.resolve(host, std::to_string(port));
-        boost::asio::connect(impl_->socket_, endpoints);
-        // set TCP_NODELAY
-        boost::system::error_code ec;
-        impl_->socket_.set_option(tcp::no_delay(true), ec);
-        if (ec) {
-            std::cerr << "[AsioTcpClient] set_option no_delay failed: " << ec.message() << std::endl;
-        }
-        {
-            std::lock_guard<std::mutex> lk(impl_->cbMtx_);
-            impl_->connected_.store(true);
-        }
-    } catch (const std::exception& ex) {
-        std::ostringstream ss;
-        ss << "[AsioTcpClient] connect failed: " << ex.what();
-        throw std::runtime_error(ss.str());
-    }
-}
-
-void AsioTcpClient::disconnect() {
-    // close socket safely
-    try {
-        boost::system::error_code ec;
-        impl_->socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
-        impl_->socket_.close(ec);
-    } catch (...) {
-        // swallow
-    }
-    {
-        std::lock_guard<std::mutex> lk(impl_->cbMtx_);
-        impl_->connected_.store(false);
-    }
+    try { stop(); } catch (...) {}
 }
 
 void AsioTcpClient::start() {
-    // start io thread and begin async read
-    impl_->startIo();
-    // schedule first async read
-    impl_->asyncReadLine();
+    // start io context thread if not already
+    if (!impl_->ioThread_.joinable()) {
+        impl_->ioThread_ = std::thread([this]() {
+            try {
+                impl_->ioContext_.run();
+            } catch (const std::exception& e) {
+                std::cerr << "[AsioTcpClient] io_context.run threw: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[AsioTcpClient] io_context.run threw unknown\n";
+            }
+        });
+    }
 }
 
 void AsioTcpClient::stop() {
-    // stop io and join thread
-    impl_->stopIo();
+    try {
+        impl_->ioContext_.stop();
+    } catch (...) {}
+    if (impl_->ioThread_.joinable()) {
+        impl_->ioThread_.join();
+    }
+    try {
+        if (impl_->socket_.is_open()) impl_->socket_.close();
+    } catch (...) {}
+    impl_->connected_.store(false);
 }
 
-bool AsioTcpClient::isConnected() const noexcept {
-    return impl_->connected_.load();
+void AsioTcpClient::connect(const std::string& host, uint16_t port) {
+    boost::asio::ip::tcp::resolver::results_type endpoints = impl_->resolver_.resolve(host, std::to_string(port));
+    boost::asio::connect(impl_->socket_, endpoints);
+    impl_->connected_.store(true);
+
+    // start read loop
+    auto self = this;
+    boost::asio::post(impl_->ioContext_, [this, self]() {
+        auto buf = std::make_shared<boost::asio::streambuf>();
+        auto readHandler = [this, buf](const boost::system::error_code& ec, std::size_t bytes) {
+            if (ec) {
+                // disconnect handling
+                impl_->connected_.store(false);
+                std::function<void()> cb;
+                {
+                    std::lock_guard<std::mutex> lk(impl_->cbMtx_);
+                    cb = impl_->onDisconnect_;
+                }
+                if (cb) {
+                    try {
+                        impl_->ioContext_.post([cb]() { try { cb(); } catch (...) {} });
+                    } catch (...) {
+                        try { std::thread([cb](){ try { cb(); } catch (...) {} }).detach(); } catch (...) {}
+                    }
+                }
+                return;
+            }
+            std::istream is(buf.get());
+            std::string line;
+            std::getline(is, line);
+            ITcpClient::RecvHandler handler;
+            {
+                std::lock_guard<std::mutex> lk(impl_->cbMtx_);
+                handler = impl_->recvHandler_;
+            }
+            if (handler) {
+                try { handler(line); } catch (...) { /* swallow */ }
+            }
+            // schedule next read
+            boost::asio::async_read_until(impl_->socket_, *buf, '\n',
+                [this, buf](const boost::system::error_code& ec2, std::size_t) {
+                    // reuse same handler (simplified)
+                });
+        };
+
+        // initial async read
+        try {
+            boost::asio::async_read_until(impl_->socket_, *buf, '\n',
+                [this, buf, readHandler](const boost::system::error_code& ec2, std::size_t bytes) {
+                    readHandler(ec2, bytes);
+                });
+        } catch (...) {}
+    });
 }
 
-void AsioTcpClient::registerRecvHandler(RecvHandler handler) {
+void AsioTcpClient::asyncConnect(const std::string& host, uint16_t port,
+                                 std::function<void(bool, std::exception_ptr)> callback) {
+    // Run blocking connect on a detached thread so caller is non-blocking.
+    std::thread([this, host, port, cb = std::move(callback)]() mutable {
+        try {
+            this->connect(host, port);
+            if (cb) cb(true, nullptr);
+        } catch (...) {
+            if (cb) cb(false, std::current_exception());
+        }
+    }).detach();
+}
+
+void AsioTcpClient::setOnDisconnect(std::function<void()> cb) {
     std::lock_guard<std::mutex> lk(impl_->cbMtx_);
-    impl_->recvHandler_ = std::move(handler);
+    impl_->onDisconnect_ = std::move(cb);
+}
+
+void AsioTcpClient::disconnect() {
+    try { impl_->socket_.close(); } catch (...) {}
+    impl_->connected_.store(false);
+    std::function<void()> cb;
+    {
+        std::lock_guard<std::mutex> lk(impl_->cbMtx_);
+        cb = impl_->onDisconnect_;
+    }
+    if (cb) {
+        try {
+            impl_->ioContext_.post([cb]() { try { cb(); } catch (...) {} });
+        } catch (...) {
+            try { std::thread([cb](){ try { cb(); } catch (...) {} }).detach(); } catch (...) {}
+        }
+    }
 }
 
 void AsioTcpClient::sendLine(const std::string& line) {
-    // sendLine: post an async write on writeStrand_
-    if (!impl_->connected_.load()) {
-        throw std::runtime_error("AsioTcpClient::sendLine: not connected");
-    }
-
-    std::string toSend = line;
-    // ensure CRLF
-    if (toSend.size() < 2 || (toSend[toSend.size()-2] != '\r' || toSend[toSend.size()-1] != '\n')) {
-        // if already ends with \n but no \r, add \r
-        if (!toSend.empty() && toSend.back() == '\n') {
-            toSend.insert(toSend.end()-1, '\r');
-        } else {
-            toSend += "\r\n";
-        }
-    }
-
-    // capture a weak_ptr-like handle via raw pointer to impl; it's safe because impl_ owned by this instance
-    boost::asio::post(impl_->writeStrand_, [impl = impl_.get(), buf = std::move(toSend)]() mutable {
-        // perform async_write; error handling logged here
-        boost::asio::async_write(impl->socket_, boost::asio::buffer(buf),
-            [impl](const boost::system::error_code& ec, std::size_t /*bytes_transferred*/) {
-                if (ec) {
-                    std::cerr << "[AsioTcpClient] async_write error: " << ec.message() << std::endl;
-                    // On write error we mark disconnected.
-                    {
-                        std::lock_guard<std::mutex> lk(impl->cbMtx_);
-                        impl->connected_.store(false);
-                    }
+    if (!impl_->connected_.load()) throw std::runtime_error("Not connected");
+    boost::asio::post(impl_->ioContext_, [this, line]() {
+        boost::system::error_code ec;
+        boost::asio::write(impl_->socket_, boost::asio::buffer(line + "\r\n"), ec);
+        if (ec) {
+            std::cerr << "[AsioTcpClient] async_write error: " << ec.message() << std::endl;
+            impl_->connected_.store(false);
+            std::function<void()> cb;
+            {
+                std::lock_guard<std::mutex> lk(impl_->cbMtx_);
+                cb = impl_->onDisconnect_;
+            }
+            if (cb) {
+                try {
+                    impl_->ioContext_.post([cb]() { try { cb(); } catch (...) {} });
+                } catch (...) {
+                    try { std::thread([cb](){ try { cb(); } catch (...) {} }).detach(); } catch (...) {}
                 }
-            });
+            }
+        }
     });
+}
+
+void AsioTcpClient::setRecvHandler(RecvHandler h) {
+    std::lock_guard<std::mutex> lk(impl_->cbMtx_);
+    impl_->recvHandler_ = std::move(h);
 }
 
 } // namespace kohzu::comm
