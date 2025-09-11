@@ -4,11 +4,11 @@
 namespace kohzu::protocol {
 
 Dispatcher::Dispatcher() {
-    startWorkers(DEFAULT_SPONT_WORKERS);
+    startWorkers(2);
 }
 
 Dispatcher::~Dispatcher() {
-    // stop workers first, then cancel pending to avoid tasks running while we destruct promises
+    // stop workers then cancel pending for safe destruction
     stopAndJoinWorkers();
     cancelAllPendingWithException("Dispatcher shutting down");
 }
@@ -26,14 +26,12 @@ void Dispatcher::startWorkers(size_t n) {
                     if (!taskQueue_.empty()) {
                         task = std::move(taskQueue_.front());
                         taskQueue_.pop_front();
-                    } else {
-                        continue;
-                    }
+                    } else continue;
                 }
                 try {
                     if (task) task();
-                } catch (const std::exception& ex) {
-                    std::cerr << "[Dispatcher::worker] task threw: " << ex.what() << std::endl;
+                } catch (const std::exception& e) {
+                    std::cerr << "[Dispatcher::worker] task threw: " << e.what() << std::endl;
                 } catch (...) {
                     std::cerr << "[Dispatcher::worker] task threw unknown exception\n";
                 }
@@ -47,19 +45,13 @@ void Dispatcher::stopAndJoinWorkers() {
     taskCv_.notify_all();
     for (auto &t : taskWorkers_) {
         if (t.joinable()) {
-            try {
-                t.join();
-            } catch (const std::exception& ex) {
-                std::cerr << "[Dispatcher] worker join error: " << ex.what() << std::endl;
-            } catch (...) {
-                std::cerr << "[Dispatcher] worker join unknown error\n";
-            }
+            try { t.join(); } catch (...) {}
         }
     }
     taskWorkers_.clear();
 }
 
-std::future<Response> Dispatcher::addPending(const std::string& key) {
+std::future<Dispatcher::Response> Dispatcher::addPending(const std::string& key) {
     std::promise<Response> prom;
     auto fut = prom.get_future();
     {
@@ -75,9 +67,7 @@ bool Dispatcher::tryFulfill(const std::string& key, const Response& response) {
     {
         std::lock_guard<std::mutex> lk(mtx_);
         auto it = pending_.find(key);
-        if (it == pending_.end() || it->second.empty()) {
-            return false;
-        }
+        if (it == pending_.end() || it->second.empty()) return false;
         prom = std::move(it->second.front());
         it->second.pop_front();
         if (it->second.empty()) pending_.erase(it);
@@ -86,8 +76,8 @@ bool Dispatcher::tryFulfill(const std::string& key, const Response& response) {
     if (have) {
         try {
             prom.set_value(response);
-        } catch (const std::future_error& fe) {
-            std::cerr << "[Dispatcher] set_value future_error: " << fe.what() << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "[Dispatcher] set_value exception: " << e.what() << std::endl;
             return false;
         } catch (...) {
             std::cerr << "[Dispatcher] set_value unknown exception\n";
@@ -114,10 +104,8 @@ void Dispatcher::removePendingWithException(const std::string& key, const std::s
     if (found) {
         try {
             prom.set_exception(std::make_exception_ptr(std::runtime_error(message)));
-        } catch (const std::future_error& fe) {
-            std::cerr << "[Dispatcher] set_exception future_error: " << fe.what() << std::endl;
         } catch (...) {
-            std::cerr << "[Dispatcher] set_exception unknown exception\n";
+            std::cerr << "[Dispatcher] removePendingWithException failed to set_exception\n";
         }
     }
 }
@@ -126,23 +114,14 @@ void Dispatcher::cancelAllPendingWithException(const std::string& message) {
     std::vector<std::promise<Response>> moved;
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        moved.reserve(64);
         for (auto &kv : pending_) {
-            for (auto &p : kv.second) {
-                moved.push_back(std::move(p));
-            }
+            for (auto &p : kv.second) moved.push_back(std::move(p));
         }
         pending_.clear();
     }
-
     for (auto &p : moved) {
-        try {
-            p.set_exception(std::make_exception_ptr(std::runtime_error(message)));
-        } catch (const std::future_error& fe) {
-            std::cerr << "[Dispatcher] set_exception future_error during cancelAll: " << fe.what() << std::endl;
-        } catch (...) {
-            std::cerr << "[Dispatcher] set_exception unknown exception during cancelAll\n";
-        }
+        try { p.set_exception(std::make_exception_ptr(std::runtime_error(message))); }
+        catch (...) { std::cerr << "[Dispatcher] cancelAllPendingWithException set_exception failed\n"; }
     }
 }
 
@@ -158,18 +137,12 @@ void Dispatcher::notifySpontaneous(const Response& resp) {
         handlers = spontaneousHandlers_;
     }
     if (handlers.empty()) return;
-
     {
         std::lock_guard<std::mutex> lk(taskMtx_);
         for (auto &h : handlers) {
             taskQueue_.emplace_back([h, resp]() {
-                try {
-                    h(resp);
-                } catch (const std::exception& ex) {
-                    std::cerr << "[Dispatcher] spontaneous handler threw: " << ex.what() << std::endl;
-                } catch (...) {
-                    std::cerr << "[Dispatcher] spontaneous handler threw unknown exception\n";
-                }
+                try { h(resp); } catch (const std::exception& e) { std::cerr << "[Dispatcher] handler threw: " << e.what() << std::endl; }
+                catch (...) { std::cerr << "[Dispatcher] handler threw unknown\n"; }
             });
         }
     }

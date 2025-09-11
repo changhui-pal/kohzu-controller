@@ -6,15 +6,13 @@ namespace kohzu::comm {
 Writer::Writer(std::shared_ptr<ITcpClient> client, std::size_t capacity)
     : client_(std::move(client)), capacity_(capacity) {}
 
-Writer::~Writer() {
-    stop(false);
-}
+Writer::~Writer() { stop(false); }
 
 void Writer::start() {
     bool expected = false;
     if (!running_.compare_exchange_strong(expected, true)) return;
     stopRequested_.store(false);
-    workerThread_ = std::thread([this]() { workerLoop(); });
+    workerThread_ = std::thread([this](){ workerLoop(); });
 }
 
 void Writer::stop(bool flush) {
@@ -56,36 +54,12 @@ void Writer::workerLoop() {
                 item = std::move(q_.front());
                 q_.pop_front();
                 cv_not_full_.notify_one();
-            } else {
-                continue;
-            }
+            } else continue;
         }
 
         try {
-            if (!client_) {
-                throw std::runtime_error("Writer: ITcpClient is null");
-            }
+            if (!client_) throw std::runtime_error("Writer: ITcpClient null");
             client_->sendLine(item);
-        } catch (const std::exception& e) {
-            std::exception_ptr ep = std::current_exception();
-            ErrorHandler eh;
-            {
-                std::lock_guard<std::mutex> lk(mtx_);
-                eh = errorHandler_;
-            }
-            if (eh) {
-                try {
-                    std::thread([eh, ep]() {
-                        try { eh(ep); } catch (...) {}
-                    }).detach();
-                } catch (...) {
-                    try { eh(ep); } catch (...) {}
-                }
-            }
-            // signal stop and break
-            stopRequested_.store(true);
-            cv_not_empty_.notify_all();
-            break;
         } catch (...) {
             std::exception_ptr ep = std::current_exception();
             ErrorHandler eh;
@@ -95,9 +69,7 @@ void Writer::workerLoop() {
             }
             if (eh) {
                 try {
-                    std::thread([eh, ep]() {
-                        try { eh(ep); } catch (...) {}
-                    }).detach();
+                    std::thread([eh, ep]() { try { eh(ep); } catch (...) {} }).detach();
                 } catch (...) {
                     try { eh(ep); } catch (...) {}
                 }
@@ -106,7 +78,7 @@ void Writer::workerLoop() {
             cv_not_empty_.notify_all();
             break;
         }
-    } // end for
+    }
 }
 
 } // namespace kohzu::comm

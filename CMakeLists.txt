@@ -18,6 +18,7 @@ set(SOURCES
     src/comm/Writer.cpp
     src/controller/KohzuManager.cpp
     src/controller/MotorController.cpp
+    src/controller/StateCache.cpp
     src/controller/Poller.cpp
     src/protocol/Dispatcher.cpp
     src/protocol/Parser.cpp

@@ -1,5 +1,6 @@
 #include "controller/Poller.hpp"
 #include "controller/MotorController.hpp"
+#include <algorithm>
 #include <iostream>
 
 namespace kohzu::controller {
@@ -9,19 +10,14 @@ Poller::Poller(std::shared_ptr<MotorController> motor,
                const std::vector<int>& axes,
                ms pollInterval,
                ms fastPollInterval)
-    : motor_(std::move(motor)),
-      cache_(std::move(cache)),
-      axesOrder_(axes),
-      pollInterval_(pollInterval),
-      fastPollInterval_(fastPollInterval) {
+    : motor_(std::move(motor)), cache_(std::move(cache)),
+      axesOrder_(axes), pollInterval_(pollInterval), fastPollInterval_(fastPollInterval) {
     auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(axesMtx_);
     for (int a : axesOrder_) lastPolled_[a] = now - pollInterval_;
 }
 
-Poller::~Poller() {
-    stop();
-}
+Poller::~Poller() { stop(); }
 
 void Poller::start() {
     std::lock_guard<std::mutex> lk(mtx_);
@@ -48,9 +44,7 @@ void Poller::setAxes(const std::vector<int>& axes) {
     std::lock_guard<std::mutex> lk(axesMtx_);
     axesOrder_ = axes;
     auto now = std::chrono::steady_clock::now();
-    for (int a : axesOrder_) {
-        if (lastPolled_.find(a) == lastPolled_.end()) lastPolled_[a] = now - pollInterval_;
-    }
+    for (int a : axesOrder_) if (lastPolled_.find(a) == lastPolled_.end()) lastPolled_[a] = now - pollInterval_;
 }
 
 void Poller::addAxis(int axis) {
@@ -91,23 +85,16 @@ void Poller::notifyOperationFinished(int axis) {
         std::lock_guard<std::mutex> lk(activeMtx_);
         activeAxes_.erase(axis);
     }
-
-    // final synchronous reads to ensure up-to-date status
     try {
         auto rdpResp = motor_->sendSync("RDP", { std::to_string(axis) }, std::chrono::milliseconds(5000));
         if (rdpResp.valid && !rdpResp.params.empty()) {
             try {
                 long pos = std::stol(rdpResp.params[0]);
                 if (cache_) cache_->updatePosition(axis, pos);
-            } catch (...) {
-                if (cache_) cache_->updateRaw(axis, rdpResp.raw);
-            }
+            } catch (...) { if (cache_) cache_->updateRaw(axis, rdpResp.raw); }
         }
-    } catch (const std::exception& e) {
-        std::cerr << "[Poller] notifyOperationFinished RDP error axis " << axis << " : " << e.what() << std::endl;
-    } catch (...) {
-        std::cerr << "[Poller] notifyOperationFinished RDP unknown error axis " << axis << std::endl;
-    }
+    } catch (const std::exception& e) { std::cerr << "[Poller] notifyOperationFinished RDP error: " << e.what() << std::endl; }
+    catch (...) { std::cerr << "[Poller] notifyOperationFinished RDP unknown\n"; }
 
     {
         std::lock_guard<std::mutex> lk(inflightMtx_);
@@ -125,52 +112,35 @@ void Poller::scheduleRdp(int axis) {
         std::lock_guard<std::mutex> lk(inflightMtx_);
         inflightRdp_.emplace(axis, fut.share());
     } catch (const std::exception& e) {
-        std::cerr << "[Poller] scheduleRdp sendAsync failed axis " << axis << " : " << e.what() << std::endl;
+        std::cerr << "[Poller] scheduleRdp sendAsync failed: " << e.what() << std::endl;
     } catch (...) {
-        std::cerr << "[Poller] scheduleRdp unknown error axis " << axis << std::endl;
+        std::cerr << "[Poller] scheduleRdp unknown error\n";
     }
 }
 
 void Poller::handleCompletedInflight() {
-    std::vector<int> finished;
+    std::vector<std::pair<int, std::shared_future<kohzu::protocol::Response>>> completed;
     {
         std::lock_guard<std::mutex> lk(inflightMtx_);
         for (auto &kv : inflightRdp_) {
             if (kv.second.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-                finished.push_back(kv.first);
+                completed.emplace_back(kv.first, kv.second);
             }
         }
+        for (auto &p : completed) inflightRdp_.erase(p.first);
     }
-    for (int axis : finished) {
-        std::shared_future<kohzu::protocol::Response> sf;
-        {
-            std::lock_guard<std::mutex> lk(inflightMtx_);
-            auto it = inflightRdp_.find(axis);
-            if (it == inflightRdp_.end()) continue;
-            sf = it->second;
-            inflightRdp_.erase(it);
-        }
+
+    for (auto &p : completed) {
+        int axis = p.first;
         try {
-            auto resp = sf.get();
-            if (!resp.valid) {
-                std::cerr << "[Poller] invalid RDP response axis " << axis << " raw=" << resp.raw << std::endl;
-                continue;
-            }
+            auto resp = p.second.get();
+            if (!resp.valid) { std::cerr << "[Poller] invalid RDP resp axis " << axis << " raw=" << resp.raw << std::endl; continue; }
             if (!resp.params.empty()) {
-                try {
-                    long pos = std::stol(resp.params[0]);
-                    if (cache_) cache_->updatePosition(axis, pos);
-                } catch (...) {
-                    if (cache_) cache_->updateRaw(axis, resp.raw);
-                }
-            } else {
-                if (cache_) cache_->updateRaw(axis, resp.raw);
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "[Poller] inflight get exception axis " << axis << " : " << e.what() << std::endl;
-        } catch (...) {
-            std::cerr << "[Poller] inflight get unknown exception axis " << axis << std::endl;
-        }
+                try { long pos = std::stol(resp.params[0]); if (cache_) cache_->updatePosition(axis, pos); }
+                catch (...) { if (cache_) cache_->updateRaw(axis, resp.raw); }
+            } else { if (cache_) cache_->updateRaw(axis, resp.raw); }
+        } catch (const std::exception& e) { std::cerr << "[Poller] inflight.get exception: " << e.what() << std::endl; }
+        catch (...) { std::cerr << "[Poller] inflight.get unknown\n"; }
     }
 }
 
@@ -180,7 +150,6 @@ void Poller::runLoop() {
             std::unique_lock<std::mutex> lk(mtx_);
             if (!running_) break;
         }
-
         handleCompletedInflight();
 
         std::vector<int> axesCopy;
@@ -193,7 +162,7 @@ void Poller::runLoop() {
             bool isActive = false;
             {
                 std::lock_guard<std::mutex> lk(activeMtx_);
-                isActive = (activeAxes_.find(axis) != activeAxes_.end());
+                isActive = activeAxes_.count(axis) != 0;
             }
             ms desired = isActive ? fastPollInterval_ : pollInterval_;
             auto lastIt = lastPolled_.find(axis);
@@ -208,7 +177,6 @@ void Poller::runLoop() {
                 }
             }
         }
-
         std::unique_lock<std::mutex> lk(mtx_);
         cv_.wait_for(lk, std::chrono::milliseconds(50), [this]() { return !running_; });
     }

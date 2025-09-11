@@ -1,9 +1,7 @@
 #pragma once
-
 #include "ITcpClient.hpp"
 #include <boost/asio.hpp>
 #include <memory>
-#include <string>
 #include <functional>
 
 namespace kohzu::comm {
@@ -21,7 +19,7 @@ public:
 
     bool isConnected() const noexcept override;
 
-    void registerRecvHandler(RecvHandler handler) override;
+    void registerRecvHandler(RecvHandler h) override;
     void sendLine(const std::string& line) override;
 
     void setOnDisconnect(std::function<void()> cb) override;

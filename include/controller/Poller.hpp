@@ -1,5 +1,4 @@
 #pragma once
-
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -13,8 +12,8 @@
 
 namespace kohzu::controller {
 
-class MotorController; // forward
-class StateCache; // forward (assumed to exist)
+class MotorController;
+class StateCache;
 
 class Poller {
 public:
@@ -55,7 +54,6 @@ private:
     std::condition_variable cv_;
     bool running_{false};
 
-    // inflight: axis -> shared_future<Response>
     std::unordered_map<int, std::shared_future<kohzu::protocol::Response>> inflightRdp_;
     std::mutex inflightMtx_;
 
@@ -64,4 +62,5 @@ private:
 
     std::unordered_map<int, std::chrono::steady_clock::time_point> lastPolled_;
 };
+
 } // namespace kohzu::controller
