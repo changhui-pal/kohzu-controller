@@ -77,7 +77,7 @@ MotorController::~MotorController() {
     try {
         stop();
     } catch (const std::exception& e) {
-        std::cerr << "[MotorController::~] stop error: " << e.what() << "\n"; // 수정: dtor 예외 로그
+        std::cerr << "[MotorController::~] stop error: " << e.what() << "\n";
     } catch (...) {
         std::cerr << "[MotorController::~] stop unknown error\n";
     }
@@ -103,7 +103,11 @@ void MotorController::start() {
             } catch (...) {
                 std::cerr << "[MotorController::WriterError] unknown exception\n";
             }
-            impl_->dispatcher->cancelAllPendingWithException("Writer error: stopping motor controller");
+            if (impl_->dispatcher) {
+                try {
+                    impl_->dispatcher->cancelAllPendingWithException("Writer error: stopping motor controller");
+                } catch (...) {}
+            }
         });
         impl_->writer->start();
     }
@@ -117,74 +121,105 @@ void MotorController::start() {
             return;
         }
 
-        // Build match key
+        // If response looks like a reply to a pending request, try to fulfill one pending
         std::string key = resp.cmd;
-        if (!resp.axis.empty()) key += ":" + resp.axis;
+        if (!resp.axis.empty()) {
+            key += ":" + resp.axis;
+        }
+        bool matched = false;
+        try {
+            if (impl_->dispatcher) {
+                matched = impl_->dispatcher->tryFulfill(key, resp);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[MotorController] dispatcher.tryFulfill threw: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[MotorController] dispatcher.tryFulfill unknown error\n";
+        }
 
-        // Try to fulfill pending; if not matched, treat as spontaneous
-        bool matched = impl_->dispatcher->tryFulfill(key, resp);
         if (!matched) {
-            impl_->dispatcher->notifySpontaneous(resp);
+            // If not matched, treat as spontaneous
+            try {
+                if (impl_->dispatcher) impl_->dispatcher->notifySpontaneous(resp);
+            } catch (const std::exception& e) {
+                std::cerr << "[MotorController] notifySpontaneous threw: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[MotorController] notifySpontaneous unknown error\n";
+            }
         }
     });
 
-    // start callback worker thread
-    impl_->cbWorkerThread = std::thread([this]() {
-        while (true) {
-            Impl::CallbackTask task;
-            {
-                std::unique_lock<std::mutex> lk(impl_->cbMtx);
-                impl_->cbCv.wait(lk, [this]() { return impl_->stopRequested.load() || !impl_->cbQueue.empty(); });
-                if (impl_->stopRequested.load() && impl_->cbQueue.empty()) break;
-                if (impl_->cbQueue.empty()) continue;
-                task = std::move(impl_->cbQueue.front());
-                impl_->cbQueue.pop_front();
-            }
+    // register disconnect callback: when TCP disconnects, cancel pending
+    impl_->tcpClient->setOnDisconnect([dispatcher = impl_->dispatcher]() {
+        try {
+            if (dispatcher) dispatcher->cancelAllPendingWithException("TCP disconnected");
+        } catch (...) {}
+    });
 
-            // Wait for the future to be ready (blocking inside callback worker)
-            std::exception_ptr eptr = nullptr;
-            kohzu::protocol::Response resp;
-            try {
-                resp = task.fut.get(); // may throw if promise set_exception
-            } catch (const std::exception& e) {
-                eptr = std::current_exception();
-                std::cerr << "[MotorController] future.get() error: " << e.what() << "\n"; // 수정: 로그 추가
-            } catch (...) {
-                eptr = std::current_exception();
-                std::cerr << "[MotorController] future.get() unknown error\n";
-            }
-
-            // Call user callback (if provided) with resp or exception ptr
-            if (task.cb) {
-                try {
-                    task.cb(resp, eptr);
-                } catch (const std::exception& e) {
-                    std::cerr << "[MotorController] user async callback threw: " << e.what() << std::endl;
-                } catch (...) {
-                    std::cerr << "[MotorController] user async callback threw unknown exception\n";
-                }
-            }
-
-            // Regardless of callback success or exception, call onOperationFinish if axis >= 0
-            if (task.axis >= 0) {
-                if (impl_->onOperationFinish) {
-                    try {
-                        impl_->onOperationFinish(task.axis);
-                    } catch (const std::exception& e) {
-                        std::cerr << "[MotorController] onOperationFinish threw: " << e.what() << "\n"; // 수정: 예외 로그
-                    } catch (...) {
-                        std::cerr << "[MotorController] onOperationFinish unknown exception\n";
+    // start callback worker thread (process futures and invoke callbacks)
+    {
+        std::lock_guard<std::mutex> lk(impl_->cbMtx);
+        impl_->cbWorkerThread = std::thread([this]() {
+            while (!impl_->stopRequested.load()) {
+                Impl::CallbackTask task;
+                {
+                    std::unique_lock<std::mutex> lk(impl_->cbMtx);
+                    impl_->cbCv.wait_for(lk, std::chrono::milliseconds(100), [this]() {
+                        return impl_->stopRequested.load() || !impl_->cbQueue.empty();
+                    });
+                    if (impl_->stopRequested.load() && impl_->cbQueue.empty()) break;
+                    if (!impl_->cbQueue.empty()) {
+                        task = std::move(impl_->cbQueue.front());
+                        impl_->cbQueue.pop_front();
+                    } else {
+                        continue;
                     }
                 }
-            }
-        } // end while
 
-        // mark worker not running
-        {
-            std::lock_guard<std::mutex> lk(impl_->cbMtx);
-            impl_->cbWorkerRunning = false;
-        }
-    });
+                // Wait for the future to be ready (blocking) but with exception safety
+                std::exception_ptr eptr = nullptr;
+                kohzu::protocol::Response resp;
+                try {
+                    resp = task.fut.get();
+                } catch (...) {
+                    eptr = std::current_exception();
+                }
+
+                // Call the user callback (in separate thread to avoid blocking worker if callback is slow)
+                if (task.cb) {
+                    try {
+                        std::thread([cb = task.cb, resp, eptr]() {
+                            try {
+                                cb(resp, eptr);
+                            } catch (const std::exception& e) {
+                                std::cerr << "[MotorController] user async callback threw: " << e.what() << std::endl;
+                            } catch (...) {
+                                std::cerr << "[MotorController] user async callback unknown exception\n";
+                            }
+                        }).detach();
+                    } catch (...) {
+                        // If thread creation fails, call in current worker thread (best-effort)
+                        try {
+                            task.cb(resp, eptr);
+                        } catch (...) { /* swallow */ }
+                    }
+                }
+
+                // If this task was a movement start, optionally notify finish on error/complete via onOperationFinish
+                if (task.axis >= 0 && impl_->onOperationFinish) {
+                    try {
+                        impl_->onOperationFinish(task.axis);
+                    } catch (...) { /* swallow to avoid worker death */ }
+                }
+            }
+
+            // mark worker not running
+            {
+                std::lock_guard<std::mutex> lk(impl_->cbMtx);
+                impl_->cbWorkerRunning = false;
+            }
+        });
+    }
 }
 
 void MotorController::stop() {
@@ -195,7 +230,7 @@ void MotorController::stop() {
         try {
             impl_->cbWorkerThread.join();
         } catch (const std::exception& e) {
-            std::cerr << "[MotorController::stop] cbWorkerThread join error: " << e.what() << "\n"; // 수정: join 예외 처리
+            std::cerr << "[MotorController::stop] cbWorkerThread join error: " << e.what() << "\n";
         } catch (...) {
             std::cerr << "[MotorController::stop] cbWorkerThread join unknown error\n";
         }
@@ -212,10 +247,15 @@ void MotorController::stop() {
     }
 
     // cancel pending in dispatcher
-    impl_->dispatcher->cancelAllPendingWithException("MotorController stopped");
+    if (impl_->dispatcher) {
+        impl_->dispatcher->cancelAllPendingWithException("MotorController stopped");
+    }
 
     // clear recv handler by registering empty handler
     impl_->tcpClient->registerRecvHandler(nullptr);
+
+    // clear disconnect callback
+    impl_->tcpClient->setOnDisconnect(nullptr);
 }
 
 void MotorController::connect(const std::string& host, uint16_t port) {
@@ -241,7 +281,7 @@ MotorController::Response MotorController::sendSync(const std::string& cmd,
     } catch (const std::exception& e) {
         // enqueue failed -> remove pending and rethrow
         impl_->dispatcher->removePendingWithException(key, "enqueue failed");
-        std::cerr << "[MotorController::sendSync] enqueue error: " << e.what() << "\n"; // 수정: 로그 추가
+        std::cerr << "[MotorController::sendSync] enqueue error: " << e.what() << "\n";
         throw;
     } catch (...) {
         impl_->dispatcher->removePendingWithException(key, "enqueue unknown failed");
@@ -271,7 +311,7 @@ std::future<MotorController::Response> MotorController::sendAsync(const std::str
         impl_->writer->enqueue(line);
     } catch (const std::exception& e) {
         impl_->dispatcher->removePendingWithException(key, "enqueue failed");
-        std::cerr << "[MotorController::sendAsync] enqueue error: " << e.what() << "\n"; // 수정: 로그 추가
+        std::cerr << "[MotorController::sendAsync] enqueue error: " << e.what() << "\n";
         throw;
     } catch (...) {
         impl_->dispatcher->removePendingWithException(key, "enqueue unknown failed");
@@ -294,7 +334,7 @@ void MotorController::sendAsync(const std::string& cmd,
         impl_->writer->enqueue(line);
     } catch (const std::exception& e) {
         impl_->dispatcher->removePendingWithException(key, "enqueue failed");
-        std::cerr << "[MotorController::sendAsync cb] enqueue error: " << e.what() << "\n"; // 수정: 로그 추가
+        std::cerr << "[MotorController::sendAsync cb] enqueue error: " << e.what() << "\n";
         if (cb) {
             cb(Response{}, std::make_exception_ptr(std::runtime_error("enqueue failed")));
         }
@@ -313,12 +353,12 @@ void MotorController::sendAsync(const std::string& cmd,
     if (impl_->movementCommands.count(cmd) && axis >= 0) {
         if (impl_->onOperationStart) {
             try { impl_->onOperationStart(axis); } catch (const std::exception& e) {
-                std::cerr << "[MotorController::sendAsync] onOperationStart error: " << e.what() << "\n"; // 수정: 로그 추가
+                std::cerr << "[MotorController::sendAsync] onOperationStart error: " << e.what() << "\n";
             } catch (...) { std::cerr << "[MotorController::sendAsync] onOperationStart unknown error\n"; }
         }
     }
 
-    // push to callback queue
+    // push to callback queue for worker
     {
         std::lock_guard<std::mutex> lk(impl_->cbMtx);
         impl_->cbQueue.push_back(Impl::CallbackTask{std::move(fut), cb, key, axis});

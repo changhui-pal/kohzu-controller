@@ -2,26 +2,14 @@
 /**
  * Dispatcher.hpp
  *
- * 요청-응답 매칭 및 spontaneous(자발) 메시지 분배를 담당하는 디스패처.
+ * 개선 요약:
+ * - 동일 키의 다중 pending을 허용하도록 자료구조 변경 (deque of promises)
+ * - spontaneous 핸들러 호출을 제한된 worker queue로 처리하여 스레드 폭증 방지
  *
- * 책임:
- *  - 키(key) 기반으로 pending promise/future 관리
- *  - 응답 도착 시 pending을 찾아 fulfill
- *  - 타임아웃/종료 시 pending에 예외 설정
- *  - 자발 메시지(Spontaneous) 핸들러 등록 및 비동기 호출
- *
- * 스레드 안정성:
- *  - addPending / tryFulfill / removePendingWithException / cancelAllPendingWithException
- *    은 내부 mutex로 보호되어 스레드 안전하게 호출 가능.
- *  - registerSpontaneousHandler / notifySpontaneous 도 handlerMtx_로 보호됨.
- *
- * 사용 예:
- *   auto fut = dispatcher.addPending("RDP:1");
- *   writer.enqueue(...);
- *   auto resp = fut.get(); // 또는 wait_for(timeout)
- *
- * 참고:
- *  - Response 타입은 Parser.hpp에 정의되어 있으며, 여기에 포함되어 사용됩니다.
+ * 사용:
+ *   auto fut = dispatcher.addPending(key);
+ *   // ... writer.enqueue(...)
+ *   auto resp = fut.get(); // 또는 fut.wait_for(...)
  */
 
 #include <future>
@@ -30,6 +18,11 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <deque>
+#include <thread>
+#include <condition_variable>
+#include <queue>
+#include <atomic>
 
 #include "Parser.hpp" // Response 정의
 
@@ -37,40 +30,49 @@ namespace kohzu::protocol {
 
 class Dispatcher {
 public:
+    using Response = kohzu::protocol::Response;
     using SpontaneousHandler = std::function<void(const Response&)>;
 
     Dispatcher();
     ~Dispatcher();
 
-    // addPending: key에 대한 promise를 등록하고 future를 반환.
-    // 호출자는 반환된 future로 응답을 대기(wait/get)할 수 있음.
-    // 만약 동일 키가 이미 존재하면 경고 로그(혹은 정책에 따라 다르게 처리)를 남기고 새 promise를 등록함.
+    // register a pending promise for key, return future to wait on
     std::future<Response> addPending(const std::string& key);
 
-    // tryFulfill: key에 해당하는 pending이 있으면 promise.set_value(response)를 수행하고 true 반환.
-    // 없으면 false 반환.
+    // try to fulfill one pending promise for key (first-in). Returns true if fulfilled.
     bool tryFulfill(const std::string& key, const Response& response);
 
-    // removePendingWithException: 특정 키에 대해 예외를 설정(타임아웃 등).
+    // remove/fulfill one pending for key with exception
     void removePendingWithException(const std::string& key, const std::string& message);
 
-    // cancelAllPendingWithException: 모든 pending에 동일한 예외를 설정(예: 종료시).
+    // cancel all pending promises with the given exception message
     void cancelAllPendingWithException(const std::string& message);
 
-    // spontaneous handler 등록 (핸들러는 Response 수신 시 비동기적으로 호출될 예정)
+    // spontaneous handlers registration
     void registerSpontaneousHandler(SpontaneousHandler h);
 
-    // notifySpontaneous: 등록된 핸들러들에 대해 비동기 호출을 수행
+    // notify spontaneous (will dispatch to handlers asynchronously via worker queue)
     void notifySpontaneous(const Response& resp);
 
 private:
-    // pending map: key -> promise<Response>
-    std::unordered_map<std::string, std::promise<Response>> pending_;
+    // pending map: key -> deque<promise<Response>>
+    std::unordered_map<std::string, std::deque<std::promise<Response>>> pending_;
     std::mutex mtx_; // protects pending_
 
-    // spontaneous handlers
+    // spontaneous handlers and worker task queue
     std::vector<SpontaneousHandler> spontaneousHandlers_;
     std::mutex handlerMtx_;
+
+    std::deque<std::function<void()>> taskQueue_;
+    std::mutex taskMtx_;
+    std::condition_variable taskCv_;
+    std::vector<std::thread> taskWorkers_;
+    std::atomic<bool> stopWorkers_{false};
+
+    // internal worker count
+    static constexpr size_t DEFAULT_SPONT_WORKERS = 2;
+    void startWorkers(size_t n = DEFAULT_SPONT_WORKERS);
+    void stopAndJoinWorkers();
 };
 
 } // namespace kohzu::protocol

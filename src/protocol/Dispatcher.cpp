@@ -1,57 +1,109 @@
-// src/protocol/Dispatcher.cpp
 #include "protocol/Dispatcher.hpp"
-#include "protocol/Parser.hpp" // for Response type
+#include "protocol/Parser.hpp"
 
 #include <chrono>
 #include <exception>
 #include <future>
 #include <iostream>
+#include <utility>
 
 namespace kohzu::protocol {
 
-Dispatcher::Dispatcher() = default;
+Dispatcher::Dispatcher() {
+    startWorkers();
+}
 
 Dispatcher::~Dispatcher() {
+    // stop workers first to avoid tasks running while we cancel pending
+    stopAndJoinWorkers();
     cancelAllPendingWithException("Dispatcher shutting down");
+}
+
+void Dispatcher::startWorkers(size_t n) {
+    stopWorkers_.store(false);
+    for (size_t i = 0; i < n; ++i) {
+        taskWorkers_.emplace_back([this]() {
+            while (!stopWorkers_.load()) {
+                std::function<void()> task;
+                {
+                    std::unique_lock<std::mutex> lk(taskMtx_);
+                    taskCv_.wait(lk, [this]() { return stopWorkers_.load() || !taskQueue_.empty(); });
+                    if (stopWorkers_.load() && taskQueue_.empty()) break;
+                    if (!taskQueue_.empty()) {
+                        task = std::move(taskQueue_.front());
+                        taskQueue_.pop_front();
+                    } else {
+                        continue;
+                    }
+                }
+                try {
+                    if (task) task();
+                } catch (const std::exception& ex) {
+                    std::cerr << "[Dispatcher::worker] task threw: " << ex.what() << std::endl;
+                } catch (...) {
+                    std::cerr << "[Dispatcher::worker] task threw unknown exception\n";
+                }
+            }
+        });
+    }
+}
+
+void Dispatcher::stopAndJoinWorkers() {
+    stopWorkers_.store(true);
+    taskCv_.notify_all();
+    for (auto &t : taskWorkers_) {
+        if (t.joinable()) {
+            try {
+                t.join();
+            } catch (const std::exception& ex) {
+                std::cerr << "[Dispatcher] worker join error: " << ex.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[Dispatcher] worker join unknown error\n";
+            }
+        }
+    }
+    taskWorkers_.clear();
 }
 
 std::future<Response> Dispatcher::addPending(const std::string& key) {
     std::promise<Response> prom;
     auto fut = prom.get_future();
 
-    std::lock_guard<std::mutex> lk(mtx_);
-    // insert only if not existing
-    if (pending_.count(key)) {
-        // existing pending for same key: this may indicate misuse; still create a new entry with unique suffix?
-        // For simplicity, we return the new future but log warning.
-        std::cerr << "[Dispatcher] Warning: addPending called for existing key: " << key << std::endl;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        // push a new promise into deque for this key
+        pending_[key].push_back(std::move(prom));
     }
-    pending_.emplace(key, std::move(prom));
     return fut;
 }
 
 bool Dispatcher::tryFulfill(const std::string& key, const Response& response) {
     std::promise<Response> prom;
+    bool have = false;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         auto it = pending_.find(key);
-        if (it == pending_.end()) {
+        if (it == pending_.end() || it->second.empty()) {
             return false;
         }
-        // move promise out
-        prom = std::move(it->second);
-        pending_.erase(it);
+        prom = std::move(it->second.front());
+        it->second.pop_front();
+        if (it->second.empty()) pending_.erase(it);
+        have = true;
     }
-    try {
-        prom.set_value(response);
-    } catch (const std::future_error& fe) {
-        std::cerr << "[Dispatcher] set_value future_error: " << fe.what() << std::endl;
-        return false;
-    } catch (...) {
-        std::cerr << "[Dispatcher] set_value unknown exception\n";
-        return false;
+    if (have) {
+        try {
+            prom.set_value(response);
+        } catch (const std::future_error& fe) {
+            std::cerr << "[Dispatcher] set_value future_error: " << fe.what() << std::endl;
+            return false;
+        } catch (...) {
+            std::cerr << "[Dispatcher] set_value unknown exception\n";
+            return false;
+        }
+        return true;
     }
-    return true;
+    return false;
 }
 
 void Dispatcher::removePendingWithException(const std::string& key, const std::string& message) {
@@ -60,9 +112,10 @@ void Dispatcher::removePendingWithException(const std::string& key, const std::s
     {
         std::lock_guard<std::mutex> lk(mtx_);
         auto it = pending_.find(key);
-        if (it != pending_.end()) {
-            prom = std::move(it->second);
-            pending_.erase(it);
+        if (it != pending_.end() && !it->second.empty()) {
+            prom = std::move(it->second.front());
+            it->second.pop_front();
+            if (it->second.empty()) pending_.erase(it);
             found = true;
         }
     }
@@ -78,18 +131,21 @@ void Dispatcher::removePendingWithException(const std::string& key, const std::s
 }
 
 void Dispatcher::cancelAllPendingWithException(const std::string& message) {
-    std::vector<std::promise<Response>> toCancel;
+    std::vector<std::promise<Response>> moved;
     {
         std::lock_guard<std::mutex> lk(mtx_);
+        moved.reserve(64);
         for (auto &kv : pending_) {
-            toCancel.push_back(std::move(kv.second));
+            for (auto &p : kv.second) {
+                moved.push_back(std::move(p));
+            }
         }
         pending_.clear();
     }
 
-    for (auto &prom : toCancel) {
+    for (auto &p : moved) {
         try {
-            prom.set_exception(std::make_exception_ptr(std::runtime_error(message)));
+            p.set_exception(std::make_exception_ptr(std::runtime_error(message)));
         } catch (const std::future_error& fe) {
             std::cerr << "[Dispatcher] set_exception future_error during cancelAll: " << fe.what() << std::endl;
         } catch (...) {
@@ -104,30 +160,30 @@ void Dispatcher::registerSpontaneousHandler(SpontaneousHandler h) {
 }
 
 void Dispatcher::notifySpontaneous(const Response& resp) {
-    // Copy handlers under lock then invoke them asynchronously (std::async)
     std::vector<SpontaneousHandler> handlers;
     {
         std::lock_guard<std::mutex> lk(handlerMtx_);
         handlers = spontaneousHandlers_;
     }
-    for (auto &h : handlers) {
-        try {
-            // launch detached async to avoid blocking caller (which is usually io thread)
-            std::async(std::launch::async, [h, resp]() {
+    if (handlers.empty()) return;
+
+    // enqueue tasks for each handler (worker threads will execute them)
+    {
+        std::lock_guard<std::mutex> lk(taskMtx_);
+        for (auto &h : handlers) {
+            // copy handler and response into task
+            taskQueue_.emplace_back([h, resp]() {
                 try {
                     h(resp);
                 } catch (const std::exception& ex) {
                     std::cerr << "[Dispatcher] spontaneous handler threw: " << ex.what() << std::endl;
                 } catch (...) {
-                    std::cerr << "[Dispatcher] spontaneous handler threw unknown exception" << std::endl;
+                    std::cerr << "[Dispatcher] spontaneous handler threw unknown exception\n";
                 }
             });
-        } catch (const std::exception& ex) {
-            std::cerr << "[Dispatcher] failed to launch async spontaneous handler: " << ex.what() << std::endl;
-        } catch (...) {
-            std::cerr << "[Dispatcher] failed to launch async spontaneous handler (unknown)\n";
         }
     }
+    taskCv_.notify_all();
 }
 
 } // namespace kohzu::protocol
