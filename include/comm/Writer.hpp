@@ -1,5 +1,5 @@
 #pragma once
-#include "ITcpClient.hpp"
+#include "comm/ITcpClient.hpp"
 #include <functional>
 #include <string>
 #include <queue>
