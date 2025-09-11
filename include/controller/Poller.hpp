@@ -4,20 +4,8 @@
  *
  * Poller: 지정된 axis들을 폴링하여 StateCache를 갱신.
  *
- * 사용법 (간단):
- *   auto poller = std::make_shared<Poller>(motorController, stateCache, {1,2,3}, std::chrono::milliseconds(200));
- *   poller->start();
- *   // Manager가 동작 시작 시:
- *   poller->notifyOperationStarted(axis);
- *   // Manager가 동작 종료 시:
- *   poller->notifyOperationFinished(axis);
- *   poller->stop();
- *
- * 주요 동작:
- *  - active axis: fast poll (e.g., 100ms)
- *  - idle axis: slow poll (e.g., pollInterval)
- *  - 각 axis별 inflight 요청을 추적하여 중복 요청을 피함
- *  - notifyOperationFinished()는 동기 final reads (sendSync)로 최종 위치를 보장
+ * 주요: inflight 요청을 std::shared_future로 관리하여
+ *       여러 스레드(또는 이동/복사 필요 지점)에서 안전하게 사용합니다.
  */
 
 #include <chrono>
@@ -28,9 +16,10 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include <future>
 
-#include "../controller/MotorController.hpp"
-#include "StateCache.hpp" // 기존 헤더 사용(필요시 조정)
+#include "controller/MotorController.hpp"
+#include "controller/StateCache.hpp" // 기존 헤더 사용(필요시 조정)
 
 namespace kohzu::controller {
 
@@ -80,8 +69,8 @@ private:
     std::condition_variable cv_;
     bool running_{false};
 
-    // inflight RDP futures: axis -> future
-    std::unordered_map<int, std::future<kohzu::protocol::Response>> inflightRdp_;
+    // inflight RDP futures: axis -> shared_future (copyable)
+    std::unordered_map<int, std::shared_future<kohzu::protocol::Response>> inflightRdp_;
     std::mutex inflightMtx_;
 
     // active axes set (movement in progress)
