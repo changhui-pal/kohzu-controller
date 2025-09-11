@@ -76,8 +76,10 @@ MotorController::MotorController(std::shared_ptr<kohzu::comm::ITcpClient> tcpCli
 MotorController::~MotorController() {
     try {
         stop();
+    } catch (const std::exception& e) {
+        std::cerr << "[MotorController::~] stop error: " << e.what() << "\n"; // 수정: dtor 예외 로그
     } catch (...) {
-        // swallow
+        std::cerr << "[MotorController::~] stop unknown error\n";
     }
 }
 
@@ -144,8 +146,12 @@ void MotorController::start() {
             kohzu::protocol::Response resp;
             try {
                 resp = task.fut.get(); // may throw if promise set_exception
+            } catch (const std::exception& e) {
+                eptr = std::current_exception();
+                std::cerr << "[MotorController] future.get() error: " << e.what() << "\n"; // 수정: 로그 추가
             } catch (...) {
                 eptr = std::current_exception();
+                std::cerr << "[MotorController] future.get() unknown error\n";
             }
 
             // Call user callback (if provided) with resp or exception ptr
@@ -164,9 +170,10 @@ void MotorController::start() {
                 if (impl_->onOperationFinish) {
                     try {
                         impl_->onOperationFinish(task.axis);
+                    } catch (const std::exception& e) {
+                        std::cerr << "[MotorController] onOperationFinish threw: " << e.what() << "\n"; // 수정: 예외 로그
                     } catch (...) {
-                        // swallow to avoid killing worker
-                        std::cerr << "[MotorController] onOperationFinish threw\n";
+                        std::cerr << "[MotorController] onOperationFinish unknown exception\n";
                     }
                 }
             }
@@ -185,7 +192,13 @@ void MotorController::stop() {
     impl_->stopRequested.store(true);
     impl_->cbCv.notify_all();
     if (impl_->cbWorkerThread.joinable()) {
-        impl_->cbWorkerThread.join();
+        try {
+            impl_->cbWorkerThread.join();
+        } catch (const std::exception& e) {
+            std::cerr << "[MotorController::stop] cbWorkerThread join error: " << e.what() << "\n"; // 수정: join 예외 처리
+        } catch (...) {
+            std::cerr << "[MotorController::stop] cbWorkerThread join unknown error\n";
+        }
     }
     {
         std::lock_guard<std::mutex> lk(impl_->cbMtx);
@@ -225,10 +238,14 @@ MotorController::Response MotorController::sendSync(const std::string& cmd,
     try {
         // use blocking enqueue
         impl_->writer->enqueue(line);
-    } catch (...) {
+    } catch (const std::exception& e) {
         // enqueue failed -> remove pending and rethrow
         impl_->dispatcher->removePendingWithException(key, "enqueue failed");
+        std::cerr << "[MotorController::sendSync] enqueue error: " << e.what() << "\n"; // 수정: 로그 추가
         throw;
+    } catch (...) {
+        impl_->dispatcher->removePendingWithException(key, "enqueue unknown failed");
+        throw std::runtime_error("[MotorController::sendSync] enqueue unknown error");
     }
 
     // wait for response with timeout
@@ -252,9 +269,13 @@ std::future<MotorController::Response> MotorController::sendAsync(const std::str
     // non-throwing tryEnqueue fallback: if queue full, throw
     try {
         impl_->writer->enqueue(line);
-    } catch (...) {
+    } catch (const std::exception& e) {
         impl_->dispatcher->removePendingWithException(key, "enqueue failed");
+        std::cerr << "[MotorController::sendAsync] enqueue error: " << e.what() << "\n"; // 수정: 로그 추가
         throw;
+    } catch (...) {
+        impl_->dispatcher->removePendingWithException(key, "enqueue unknown failed");
+        throw std::runtime_error("[MotorController::sendAsync] enqueue unknown error");
     }
 
     return fut;
@@ -271,10 +292,18 @@ void MotorController::sendAsync(const std::string& cmd,
     std::string line = kohzu::protocol::CommandBuilder::makeCommand(cmd, params, false);
     try {
         impl_->writer->enqueue(line);
-    } catch (...) {
+    } catch (const std::exception& e) {
         impl_->dispatcher->removePendingWithException(key, "enqueue failed");
+        std::cerr << "[MotorController::sendAsync cb] enqueue error: " << e.what() << "\n"; // 수정: 로그 추가
         if (cb) {
             cb(Response{}, std::make_exception_ptr(std::runtime_error("enqueue failed")));
+        }
+        return;
+    } catch (...) {
+        impl_->dispatcher->removePendingWithException(key, "enqueue unknown failed");
+        std::cerr << "[MotorController::sendAsync cb] enqueue unknown error\n";
+        if (cb) {
+            cb(Response{}, std::make_exception_ptr(std::runtime_error("enqueue unknown failed")));
         }
         return;
     }
@@ -283,7 +312,9 @@ void MotorController::sendAsync(const std::string& cmd,
     int axis = Impl::parseAxisFromParams(params);
     if (impl_->movementCommands.count(cmd) && axis >= 0) {
         if (impl_->onOperationStart) {
-            try { impl_->onOperationStart(axis); } catch (...) { /* swallow */ }
+            try { impl_->onOperationStart(axis); } catch (const std::exception& e) {
+                std::cerr << "[MotorController::sendAsync] onOperationStart error: " << e.what() << "\n"; // 수정: 로그 추가
+            } catch (...) { std::cerr << "[MotorController::sendAsync] onOperationStart unknown error\n"; }
         }
     }
 

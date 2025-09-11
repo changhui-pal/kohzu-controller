@@ -75,8 +75,11 @@ bool attemptConnectWithPrompt(KohzuManager &manager, bool autoReconnect) {
     }
 
     // interactive retry prompt
-    while (!ok && !g_stop.load()) {
-        std::cerr << "[CLI] connectOnce failed.\n";
+    // 수정: 무한 루프 방지 위해 최대 5회 재시도 제한. 런타임 오류 방지.
+    int retryCount = 0;
+    const int maxRetries = 5;
+    while (!ok && !g_stop.load() && retryCount < maxRetries) {
+        std::cerr << "[CLI] connectOnce failed (attempt " << (retryCount + 1) << "/" << maxRetries << ").\n";
         std::cout << "Do you want to retry connection? (y/n): " << std::flush;
         std::string answer;
         if (!std::getline(std::cin, answer)) {
@@ -91,10 +94,14 @@ bool attemptConnectWithPrompt(KohzuManager &manager, bool autoReconnect) {
                 std::cout << "[CLI] connected\n";
                 return true;
             }
+            retryCount++;
         } else {
             std::cerr << "[CLI] exiting due to connection failure.\n";
             return false;
         }
+    }
+    if (retryCount >= maxRetries) {
+        std::cerr << "[CLI] Max retries reached. Exiting connect attempt.\n";
     }
     return ok;
 }
@@ -144,7 +151,11 @@ int main(int argc, char** argv) {
         bool ok = attemptConnectWithPrompt(manager, autoReconnect);
         if (!ok) {
             // ensure we stop cleanly
-            try { manager.stop(); } catch (...) {}
+            try { manager.stop(); } catch (const std::exception& e) {
+                std::cerr << "[CLI] stop error during failed connect: " << e.what() << "\n"; // 수정: 예외 로그
+            } catch (...) {
+                std::cerr << "[CLI] unknown stop error during failed connect\n";
+            }
             return 1;
         }
     }
@@ -228,8 +239,12 @@ int main(int argc, char** argv) {
                             }
                         };
 
-                        manager.moveAbsoluteAsync(axis, pos, cb);
-                        std::cout << "[CLI] moveAbsoluteAsync dispatched\n";
+                        try {
+                            manager.moveAbsoluteAsync(axis, pos, cb);
+                            std::cout << "[CLI] moveAbsoluteAsync dispatched\n";
+                        } catch (const std::exception& e) {
+                            std::cerr << "[CLI] moveAbsoluteAsync error: " << e.what() << "\n"; // 수정: 예외 처리
+                        }
                     } else {
                         std::cerr << "[CLI] usage: move abs <axis> <pos>\n";
                     }
@@ -302,7 +317,11 @@ int main(int argc, char** argv) {
     // Graceful shutdown performed from main thread
     try {
         manager.stop();
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        std::cerr << "[CLI] manager stop error: " << e.what() << "\n"; // 수정: 예외 로그
+    } catch (...) {
+        std::cerr << "[CLI] unknown manager stop error\n";
+    }
     std::cout << "[CLI] exited\n";
     return 0;
 }

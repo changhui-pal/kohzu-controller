@@ -53,7 +53,13 @@ void KohzuManager::stop() {
     }
 
     if (reconThread_.joinable()) {
-        reconThread_.join();
+        try {
+            reconThread_.join();
+        } catch (const std::exception& e) {
+            std::cerr << "[KohzuManager::stop] reconThread join error: " << e.what() << "\n"; // 수정: join 예외 처리
+        } catch (...) {
+            std::cerr << "[KohzuManager::stop] reconThread join unknown error\n";
+        }
     }
 
     // teardown controller/poller
@@ -66,20 +72,6 @@ bool KohzuManager::connectOnce() {
         // create fresh tcp client and dispatcher
         tcpClient_ = std::make_shared<kohzu::comm::AsioTcpClient>();
         dispatcher_ = std::make_shared<kohzu::protocol::Dispatcher>();
-
-        // Register onDisconnect callback so that when TCP disconnects we cancel pending dispatcher entries.
-        // This prevents indefinitely waiting futures and helps with graceful recovery.
-        try {
-            tcpClient_->setOnDisconnect([dispatcher = dispatcher_]() {
-                try {
-                    if (dispatcher) dispatcher->cancelAllPendingWithException("TCP disconnected");
-                } catch (...) {
-                    // swallow: best-effort cancellation
-                }
-            });
-        } catch (...) {
-            // If setOnDisconnect not supported, continue without it (but ideally interface provides it).
-        }
 
         // create motor controller
         controller_ = std::make_shared<MotorController>(tcpClient_, dispatcher_);
@@ -109,7 +101,11 @@ bool KohzuManager::connectOnce() {
     } catch (const std::exception& ex) {
         std::cerr << "[KohzuManager] connectOnce failed: " << ex.what() << std::endl;
         // cleanup partials
-        try { teardown(); } catch (...) {}
+        try { teardown(); } catch (const std::exception& te) {
+            std::cerr << "[KohzuManager] teardown during connectOnce error: " << te.what() << "\n"; // 수정: teardown 예외 로그
+        } catch (...) {
+            std::cerr << "[KohzuManager] teardown unknown error during connectOnce\n";
+        }
         return false;
     } catch (...) {
         std::cerr << "[KohzuManager] connectOnce unknown error\n";
@@ -117,7 +113,6 @@ bool KohzuManager::connectOnce() {
         return false;
     }
 }
-
 
 bool KohzuManager::isRunning() const noexcept {
     return running_.load();
@@ -140,7 +135,10 @@ void KohzuManager::reconnectionLoop() {
     }
 
     // autoReconnect loop
-    while (!stopRequested_.load()) {
+    // 수정: 무한 루프 방지 위해 최대 재연결 시도 제한 (예: 10회). 런타임 오류 방지.
+    int maxReconnects = 10;
+    int reconnectCount = 0;
+    while (!stopRequested_.load() && reconnectCount < maxReconnects) {
         bool ok = connectOnce();
         if (ok) {
             // connected; wait until disconnected or stopRequested_
@@ -152,6 +150,7 @@ void KohzuManager::reconnectionLoop() {
                     std::cerr << "[KohzuManager] detected disconnection, will attempt reconnect\n";
                     // teardown existing broken resources and break to outer loop
                     teardown();
+                    reconnectCount++;
                     break;
                 }
             }
@@ -159,7 +158,11 @@ void KohzuManager::reconnectionLoop() {
         } else {
             // failed to connect; wait and retry
             std::this_thread::sleep_for(reconnectInterval_);
+            reconnectCount++;
         }
+    }
+    if (reconnectCount >= maxReconnects) {
+        std::cerr << "[KohzuManager] Max reconnect attempts reached. Stopping reconnection loop.\n";
     }
 
     running_.store(false);
@@ -168,19 +171,33 @@ void KohzuManager::reconnectionLoop() {
 void KohzuManager::teardown() {
     std::lock_guard<std::mutex> lk(mtx_);
     if (poller_) {
-        try { poller_->stop(); } catch (...) {}
+        try { poller_->stop(); } catch (const std::exception& e) {
+            std::cerr << "[KohzuManager::teardown] poller stop error: " << e.what() << "\n"; // 수정: 예외 로그
+        } catch (...) {
+            std::cerr << "[KohzuManager::teardown] poller stop unknown error\n";
+        }
         poller_.reset();
     }
     if (controller_) {
-        try { controller_->stop(); } catch (...) {}
+        try { controller_->stop(); } catch (const std::exception& e) {
+            std::cerr << "[KohzuManager::teardown] controller stop error: " << e.what() << "\n";
+        } catch (...) {
+            std::cerr << "[KohzuManager::teardown] controller stop unknown error\n";
+        }
         controller_.reset();
     }
     if (tcpClient_) {
-        try { tcpClient_->stop(); tcpClient_->disconnect(); } catch (...) {}
+        try { tcpClient_->stop(); tcpClient_->disconnect(); } catch (const std::exception& e) {
+            std::cerr << "[KohzuManager::teardown] tcpClient stop/disconnect error: " << e.what() << "\n";
+        } catch (...) {
+            std::cerr << "[KohzuManager::teardown] tcpClient unknown error\n";
+        }
         tcpClient_.reset();
     }
     if (dispatcher_) {
-        try { dispatcher_.reset(); } catch (...) {}
+        try { dispatcher_.reset(); } catch (...) {
+            std::cerr << "[KohzuManager::teardown] dispatcher reset unknown error\n";
+        }
     }
     // cache_ remains (we keep last known state), do not clear by default
 }

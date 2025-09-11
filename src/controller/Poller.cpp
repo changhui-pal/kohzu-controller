@@ -42,7 +42,15 @@ void Poller::stop() {
         running_ = false;
     }
     cv_.notify_all();
-    if (worker_.joinable()) worker_.join();
+    if (worker_.joinable()) {
+        try {
+            worker_.join();
+        } catch (const std::exception& e) {
+            std::cerr << "[Poller::stop] worker join error: " << e.what() << "\n"; // 수정: join 예외 처리
+        } catch (...) {
+            std::cerr << "[Poller::stop] worker join unknown error\n";
+        }
+    }
 
     // clear inflight futures map
     {
@@ -108,8 +116,12 @@ void Poller::notifyOperationFinished(int axis) {
             try {
                 long pos = std::stol(rdpResp.params[0]);
                 cache_->updatePosition(axis, pos);
-            } catch (...) {
+            } catch (const std::exception& e) {
+                std::cerr << "[Poller::notifyOperationFinished] pos parse error: " << e.what() << "\n"; // 수정: 로그 추가
                 // store raw if cannot parse
+                cache_->updateRaw(axis, rdpResp.raw);
+            } catch (...) {
+                std::cerr << "[Poller::notifyOperationFinished] pos parse unknown error\n";
                 cache_->updateRaw(axis, rdpResp.raw);
             }
         }
@@ -127,8 +139,11 @@ void Poller::notifyOperationFinished(int axis) {
             bool running = false;
             try {
                 running = (std::stol(strResp.params[0]) != 0);
-            } catch (...) {
+            } catch (const std::exception& e) {
+                std::cerr << "[Poller::notifyOperationFinished] running parse error: " << e.what() << "\n"; // 수정: 로그 추가
                 // leave running as false if parse fails
+            } catch (...) {
+                std::cerr << "[Poller::notifyOperationFinished] running parse unknown error\n";
             }
             cache_->updateRunning(axis, running);
             cache_->updateRaw(axis, strResp.raw);
@@ -154,10 +169,10 @@ void Poller::scheduleRdp(int axis) {
     }
 
     try {
-        // sendAsync returns std::future<Response>, convert to shared_future via .share()
+        // sendAsync returns future<Response>
         auto fut = motor_->sendAsync("RDP", { std::to_string(axis) });
         std::lock_guard<std::mutex> lk(inflightMtx_);
-        inflightRdp_.emplace(axis, fut.share());
+        inflightRdp_.emplace(axis, std::move(fut));
     } catch (const std::exception& e) {
         std::cerr << "[Poller] scheduleRdp: sendAsync failed for axis " << axis << " : " << e.what() << std::endl;
     } catch (...) {
@@ -172,25 +187,25 @@ void Poller::handleCompletedInflight() {
         std::lock_guard<std::mutex> lk(inflightMtx_);
         for (auto &kv : inflightRdp_) {
             int axis = kv.first;
-            auto &sf = kv.second;
-            if (sf.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            auto &fut = kv.second;
+            if (fut.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
                 finished.push_back(axis);
             }
         }
     }
 
     for (int axis : finished) {
-        std::shared_future<kohzu::protocol::Response> sf;
+        std::future<kohzu::protocol::Response> fut;
         {
             std::lock_guard<std::mutex> lk(inflightMtx_);
             auto it = inflightRdp_.find(axis);
             if (it == inflightRdp_.end()) continue;
-            sf = it->second;
+            fut = std::move(it->second);
             inflightRdp_.erase(it);
         }
 
         try {
-            auto resp = sf.get(); // may throw if set_exception
+            auto resp = fut.get(); // may throw if set_exception
             if (!resp.valid) {
                 std::cerr << "[Poller] invalid RDP response axis " << axis << " raw=" << resp.raw << std::endl;
                 continue;
@@ -200,14 +215,18 @@ void Poller::handleCompletedInflight() {
                 try {
                     long pos = std::stol(resp.params[0]);
                     cache_->updatePosition(axis, pos);
+                } catch (const std::exception& e) {
+                    std::cerr << "[Poller] pos stol error: " << e.what() << "\n"; // 수정: 로그 추가
+                    cache_->updateRaw(axis, resp.raw);
                 } catch (...) {
+                    std::cerr << "[Poller] pos stol unknown error\n";
                     cache_->updateRaw(axis, resp.raw);
                 }
             } else {
                 cache_->updateRaw(axis, resp.raw);
             }
         } catch (const std::exception& e) {
-            std::cerr << "[Poller] inflight future.get() exception for axis " << axis << " : " << e.what() << std::endl;
+            std::cerr << "[Poller] inflight future future.get() exception for axis " << axis << " : " << e.what() << std::endl;
         } catch (...) {
             std::cerr << "[Poller] inflight future.get() unknown exception for axis " << axis << std::endl;
         }
@@ -215,11 +234,14 @@ void Poller::handleCompletedInflight() {
 }
 
 void Poller::runLoop() {
+    auto nextWake = std::chrono::steady_clock::now();
     while (true) {
         {
             std::unique_lock<std::mutex> lk(mtx_);
             if (!running_) break;
         }
+
+        auto now = std::chrono::steady_clock::now();
 
         // 1) handle any completed inflight futures
         handleCompletedInflight();
@@ -231,7 +253,6 @@ void Poller::runLoop() {
             axesCopy = axesOrder_;
         }
 
-        auto now = std::chrono::steady_clock::now();
         for (int axis : axesCopy) {
             // determine desired interval for this axis
             bool isActive = false;
@@ -251,6 +272,8 @@ void Poller::runLoop() {
                         scheduleRdp(axis);
                         // update lastPolled to avoid immediate re-schedule (even if schedule failed we set it)
                         lastPolled_[axis] = now;
+                    } else {
+                        // if inflight, skip scheduling; lastPolled remains old so we'll retry after interval
                     }
                 }
             }
