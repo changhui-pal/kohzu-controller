@@ -1,40 +1,49 @@
 cmake_minimum_required(VERSION 3.10)
-project(kohzu-controller LANGUAGES CXX)
+project(kohzu-controller VERSION 1.0)
 
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-# Boost 찾기: system 구성 요소만 필요
-find_package(Boost REQUIRED COMPONENTS system)
+# Boost 라이브러리 찾기 (asio, system)
+find_package(Boost REQUIRED COMPONENTS asio system)
 if(NOT Boost_FOUND)
-    message(FATAL_ERROR "Boost not found. Please install Boost (e.g., sudo apt-get install libboost-all-dev on Ubuntu)")
+    message(FATAL_ERROR "Boost not found. Please install Boost libraries.")
 endif()
 
-# 소스 파일 목록 명시적 정의
-set(SOURCES
-    src/app/cli_main.cpp
-    src/comm/AsioTcpClient.cpp
-    src/comm/Writer.cpp
-    src/controller/KohzuManager.cpp
-    src/controller/MotorController.cpp
-    src/controller/StateCache.cpp
-    src/controller/Poller.cpp
-    src/protocol/Dispatcher.cpp
-    src/protocol/Parser.cpp
+# spdlog 라이브러리 찾기
+find_package(spdlog REQUIRED)
+if(NOT spdlog_FOUND)
+    message(FATAL_ERROR "spdlog not found. Please install spdlog library.")
+endif()
+
+# 헤더 파일 경로 설정
+include_directories(include)
+
+# 소스 파일 목록
+set(SOURCE_FILES
+    src/app/main.cpp
+    src/controller/KohzuController.cpp
+    src/core/TcpClient.cpp
+    src/protocol/ProtocolHandler.cpp
+    src/protocol/exceptions/ConnectionException.cpp
+    src/protocol/exceptions/ProtocolException.cpp
+    src/protocol/exceptions/TimeoutException.cpp
+    src/common/ThreadSafeQueue.cpp
 )
 
 # 실행 파일 생성
-add_executable(kohzu_controller ${SOURCES})
+add_executable(kohzu_controller ${SOURCE_FILES})
 
-# 인클루드 디렉토리 설정
-target_include_directories(kohzu_controller PRIVATE include)
+# 라이브러리 링크
+target_link_libraries(kohzu_controller PRIVATE
+    Boost::asio
+    Boost::system
+    spdlog::spdlog
+)
 
-# 링크 라이브러리: Boost::system과 pthread
-target_link_libraries(kohzu_controller PRIVATE Boost::system pthread)
-
-# 컴파일 옵션 추가: 최적화 및 경고 활성화
-target_compile_options(kohzu_controller PRIVATE -O2 -Wall)
-
-# 설치 타겟 (선택적)
-install(TARGETS kohzu_controller DESTINATION bin)
+# Boost의 정적 라이브러리 사용 시, thread 라이브러리 추가 링크 (CMake가 자동으로 하지 않을 수 있음)
+if(WIN32)
+    set(CMAKE_THREAD_LIBS_INIT "-lwsock32 -lws2_32 -lboost_thread")
+else()
+    set(CMAKE_THREAD_LIBS_INIT "-lpthread")
+endif()
