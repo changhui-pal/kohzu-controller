@@ -20,9 +20,12 @@ ProtocolHandler::ProtocolHandler(std::shared_ptr<ICommunicationClient> client)
  * @brief 프로토콜 핸들러를 초기화하고 비동기 읽기 작업을 시작합니다.
  */
 void ProtocolHandler::initialize() {
-    client_->asyncRead([this](const std::string& data) {
-        this->handleRead(data);
-    });
+    if (!is_reading_) {
+        is_reading_ = true;
+        client_->asyncRead([this](const std::string& data) {
+            this->handleRead(data);
+        });
+    }
 }
 
 /**
@@ -31,7 +34,9 @@ void ProtocolHandler::initialize() {
  * @param callback 응답이 도착했을 때 실행될 콜백 함수.
  */
 void ProtocolHandler::sendCommand(const std::string& command, std::function<void(const ProtocolResponse&)> callback) {
-    //TODO: sendCommand 함수에 콜백을 매핑하는 로직 추가
+    std::string response_key = command; // 간단한 매핑을 위해 명령어를 키로 사용
+    response_callbacks_[response_key] = callback;
+
     client_->asyncWrite(command + "\r\n");
 }
 
@@ -41,10 +46,23 @@ void ProtocolHandler::sendCommand(const std::string& command, std::function<void
  */
 void ProtocolHandler::handleRead(const std::string& response_data) {
     try {
-        // TODO: 응답을 파싱하고, 해당하는 콜백을 찾아 실행하는 로직 추가
         ProtocolResponse response = parseResponse(response_data);
         spdlog::info("응답 수신: {}", response.full_response);
-        // TODO: 큐에서 콜백을 찾아 실행하는 로직 추가
+
+        // 응답 키 생성 (명령어 + 축번호)
+        std::string response_key = response.command;
+        if (response.axis_no >= 0) {
+            response_key += std::to_string(response.axis_no);
+        }
+
+        // 해당하는 콜백을 찾아 실행
+        auto it = response_callbacks_.find(response.command);
+        if (it != response_callbacks_.end()) {
+            it->second(response);
+            response_callbacks_.erase(it);
+        } else {
+            spdlog::warn("일치하는 콜백을 찾을 수 없습니다. 응답: {}", response_data);
+        }
     } catch (const ProtocolException& e) {
         spdlog::error("프로토콜 오류: {}", e.what());
     }
@@ -58,7 +76,7 @@ void ProtocolHandler::handleRead(const std::string& response_data) {
  * @param response 파싱할 응답 문자열.
  * @return 파싱된 ProtocolResponse 객체.
  */
-ProtocolResponse ProtocolHandler::parseResponse(const std::string& response) {
+ProtocolHandler::ProtocolResponse ProtocolHandler::parseResponse(const std::string& response) {
     ProtocolResponse parsed;
     parsed.full_response = response;
     std::string cleaned_response = response;

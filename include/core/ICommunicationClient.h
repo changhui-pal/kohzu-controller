@@ -1,52 +1,33 @@
-#ifndef I_COMMUNICATION_CLIENT_H
-#define I_COMMUNICATION_CLIENT_H
+#pragma once
 
 #include <string>
 #include <functional>
 
 /**
- * @brief Asynchronous communication client interface.
- *
- * This interface provides an abstraction for various communication methods
- * like TCP/IP or RS-232C, ensuring that the higher-level ProtocolHandler
- * is not dependent on a specific communication implementation.
+ * @interface ICommunicationClient
+ * @brief 통신 클라이언트의 추상 인터페이스.
+ * 비동기 데이터 송수신 기능을 포함하여 통신 계층의 결합도를 낮춥니다.
  */
 class ICommunicationClient {
 public:
-    using MessageCallback = std::function<void(const std::string&)>;
-    using ErrorCallback = std::function<void(const std::string&)>;
-
     virtual ~ICommunicationClient() = default;
 
     /**
-     * @brief Attempts to connect to the server.
-     * @param host The IP address or hostname of the server.
-     * @param port The port number of the server.
+     * @brief 컨트롤러에 연결하는 메서드.
+     * @param host 연결할 호스트 주소.
+     * @param port 연결할 포트 번호.
      */
     virtual void connect(const std::string& host, const std::string& port) = 0;
 
     /**
-     * @brief Disconnects from the server.
+     * @brief 데이터를 비동기적으로 전송하는 메서드.
+     * @param data 전송할 문자열 데이터.
      */
-    virtual void disconnect() = 0;
+    virtual void asyncWrite(const std::string& data) = 0;
 
     /**
-     * @brief Asynchronously sends data to the server.
-     * @param message The data string to send.
+     * @brief 데이터를 비동기적으로 수신하기 시작하는 메서드.
+     * @param callback 수신 완료 시 호출될 콜백 함수.
      */
-    virtual void write(const std::string& message) = 0;
-
-    /**
-     * @brief Registers a callback function to be called upon receiving a message.
-     * @param callback The callback function to receive the message.
-     */
-    virtual void setReadCallback(MessageCallback callback) = 0;
-
-    /**
-     * @brief Registers a callback function to be called upon an error.
-     * @param callback The callback function to receive the error message.
-     */
-    virtual void setErrorCallback(ErrorCallback callback) = 0;
+    virtual void asyncRead(std::function<void(const std::string&)> callback) = 0;
 };
-
-#endif // I_COMMUNICATION_CLIENT_H

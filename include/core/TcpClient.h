@@ -1,54 +1,41 @@
-#ifndef TCP_CLIENT_H
-#define TCP_CLIENT_H
+#pragma once
 
-#include <boost/asio.hpp>
-#include <boost/asio/steady_timer.hpp>
 #include "ICommunicationClient.h"
-#include "spdlog/spdlog.h"
+#include <boost/asio.hpp>
 #include <string>
-#include <deque>
+#include <functional>
+#include <memory>
 #include <mutex>
-#include <thread>
-#include <atomic>
 
+using namespace boost::asio;
+using ip::tcp;
+
+/**
+ * @class TcpClient
+ * @brief TCP/IP 통신을 위한 클라이언트 클래스.
+ * ICommunicationClient 인터페이스를 구현하며, Boost.Asio를 사용해 비동기 통신을 처리합니다.
+ */
 class TcpClient : public ICommunicationClient {
 public:
     TcpClient(boost::asio::io_context& io_context, const std::string& host, const std::string& port);
     ~TcpClient();
 
     void connect(const std::string& host, const std::string& port) override;
-    void disconnect() override;
-    void write(const std::string& message) override;
-    void setReadCallback(MessageCallback callback) override;
-    void setErrorCallback(ErrorCallback callback) override;
+    void asyncWrite(const std::string& data) override;
+    void asyncRead(std::function<void(const std::string&)> callback) override;
 
 private:
-    void do_connect(const boost::asio::ip::tcp::resolver::results_type& endpoints);
-    void do_read();
-    void do_write();
-    void start_keep_alive_timer();
-    void check_keep_alive(const boost::system::error_code& error);
-    void handle_error(const boost::system::error_code& error, const std::string& description);
+    void doConnect(const tcp::resolver::results_type& endpoints);
+    void doRead();
+    void doWrite(const std::string& data);
 
     boost::asio::io_context& io_context_;
-    boost::asio::ip::tcp::socket socket_;
-    boost::asio::ip::tcp::resolver resolver_;
-    boost::asio::streambuf read_buffer_;
+    tcp::socket socket_;
+    tcp::resolver resolver_;
     std::string host_;
     std::string port_;
-
-    MessageCallback read_callback_;
-    ErrorCallback error_callback_;
-
-    std::deque<std::string> write_queue_;
-    std::mutex write_queue_mutex_;
-
-    boost::asio::steady_timer keep_alive_timer_;
-    static constexpr int RECONNECT_ATTEMPTS = 5;
-    static constexpr std::chrono::seconds RECONNECT_INTERVAL{3};
-    static constexpr std::chrono::seconds KEEP_ALIVE_INTERVAL{5};
-
-    std::atomic<int> reconnect_count_ = 0;
+    std::vector<char> read_buffer_;
+    std::string read_data_;
+    std::function<void(const std::string&)> read_callback_;
+    std::mutex write_mutex_;
 };
-
-#endif // TCP_CLIENT_H

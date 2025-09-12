@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <future>
+#include <atomic>
 
 /**
  * @struct ProtocolResponse
@@ -54,4 +55,6 @@ private:
     ProtocolResponse parseResponse(const std::string& response);
 
     std::shared_ptr<ICommunicationClient> client_;
+    std::map<std::string, std::function<void(const ProtocolResponse&)>> response_callbacks_;
+    std::atomic<bool> is_reading_ = false;
 };
