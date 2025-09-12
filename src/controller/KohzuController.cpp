@@ -77,8 +77,9 @@ void KohzuController::readCurrentPosition(int axis_no) {
     );
 }
 
-void KohzuController::startPositionMonitor(int axis_no) {
+std::future<void> KohzuController::startPositionMonitor(int axis_no, int interval_ms) {
     // TODO: 주기적인 RDP 명령을 보내고 콜백으로 위치를 갱신하는 로직을 추가해야 합니다.
     // 이는 Boost.Asio 타이머를 사용하거나 별도의 스레드에서 sleep을 사용하는 방법으로 구현할 수 있습니다.
     spdlog::info("축 {} 위치 모니터링 시작 (기능 구현 필요).", axis_no);
+    return {};
 }

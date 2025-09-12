@@ -5,6 +5,10 @@
 #include "protocol/exceptions/ProtocolException.h"
 #include "protocol/exceptions/TimeoutException.h"
 #include <memory>
+#include <map>
+#include <string>
+#include <thread>
+#include <future>
 
 /**
  * @class KohzuController
@@ -47,6 +51,14 @@ public:
      * @param axis_no 축 번호.
      */
     void readCurrentPosition(int axis_no);
+
+    /**
+     * @brief 지정된 축의 위치를 주기적으로 모니터링하는 비동기 메서드.
+     * @param axis_no 축 번호.
+     * @param interval_ms 모니터링 주기 (밀리초).
+     * @return 모니터링을 중지할 수 있는 future 객체.
+     */
+    std::future<void> startPositionMonitor(int axis_no, int interval_ms);
 
 private:
     std::shared_ptr<ProtocolHandler> protocolHandler_;

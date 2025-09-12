@@ -53,8 +53,10 @@ public:
 private:
     void handleRead(const std::string& response_data);
     ProtocolResponse parseResponse(const std::string& response);
+    std::string generateResponseKey(const ProtocolResponse& response);
 
     std::shared_ptr<ICommunicationClient> client_;
+    // 콜백을 <명령어/축번호, 콜백 함수> 형식으로 매핑
     std::map<std::string, std::function<void(const ProtocolResponse&)>> response_callbacks_;
     std::atomic<bool> is_reading_ = false;
 };

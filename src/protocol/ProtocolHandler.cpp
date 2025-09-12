@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <boost/asio.hpp>
+#include <atomic>
 
 /**
  * @brief ProtocolHandler 클래스의 생성자.
@@ -34,7 +35,7 @@ void ProtocolHandler::initialize() {
  * @param callback 응답이 도착했을 때 실행될 콜백 함수.
  */
 void ProtocolHandler::sendCommand(const std::string& command, std::function<void(const ProtocolResponse&)> callback) {
-    std::string response_key = command; // 간단한 매핑을 위해 명령어를 키로 사용
+    std::string response_key = command; // 예시로 명령어만 사용
     response_callbacks_[response_key] = callback;
 
     client_->asyncWrite(command + "\r\n");
@@ -49,19 +50,19 @@ void ProtocolHandler::handleRead(const std::string& response_data) {
         ProtocolResponse response = parseResponse(response_data);
         spdlog::info("응답 수신: {}", response.full_response);
 
-        // 응답 키 생성 (명령어 + 축번호)
-        std::string response_key = response.command;
-        if (response.axis_no >= 0) {
-            response_key += std::to_string(response.axis_no);
+        // 콜백 ID가 파라미터에 포함되어 있다고 가정
+        if (response.params.empty()) {
+            throw ProtocolException("응답에 콜백 ID가 포함되어 있지 않습니다.");
         }
-
-        // 해당하는 콜백을 찾아 실행
-        auto it = response_callbacks_.find(response.command);
+        
+        unsigned int request_id = std::stoul(response.params.back()); // 마지막 파라미터가 ID
+        
+        auto it = response_callbacks_.find(request_id);
         if (it != response_callbacks_.end()) {
             it->second(response);
             response_callbacks_.erase(it);
         } else {
-            spdlog::warn("일치하는 콜백을 찾을 수 없습니다. 응답: {}", response_data);
+            spdlog::warn("일치하는 콜백 ID를 찾을 수 없습니다. 응답: {}", response_data);
         }
     } catch (const ProtocolException& e) {
         spdlog::error("프로토콜 오류: {}", e.what());
