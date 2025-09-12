@@ -1,146 +1,111 @@
 #include "protocol/ProtocolHandler.h"
+#include "spdlog/spdlog.h"
 #include "protocol/exceptions/ConnectionException.h"
 #include "protocol/exceptions/ProtocolException.h"
 #include "protocol/exceptions/TimeoutException.h"
-#include "spdlog/spdlog.h"
-#include <sstream>
-#include <vector>
-#include <stdexcept>
-#include <regex>
+#include <iostream>
+#include <boost/lexical_cast.hpp>
 
 ProtocolHandler::ProtocolHandler(std::shared_ptr<ICommunicationClient> client)
     : client_(client) {
     if (!client_) {
-        throw std::invalid_argument("ICommunicationClient cannot be null.");
+        throw std::invalid_argument("ICommunicationClient 객체가 유효하지 않습니다.");
     }
-    loadErrorMessages();
-    spdlog::info("ProtocolHandler 객체가 생성되었습니다.");
-}
-
-ProtocolHandler::~ProtocolHandler() {
-    spdlog::info("ProtocolHandler 객체가 소멸되었습니다.");
 }
 
 void ProtocolHandler::initialize() {
-    client_->setReadCallback(std::bind(&ProtocolHandler::handleRead, this, std::placeholders::_1));
-    client_->setErrorCallback(std::bind(&ProtocolHandler::handleError, this, std::placeholders::_1));
+    spdlog::info("ProtocolHandler 초기화 시작.");
+    // 비동기 수신 루프 시작
+    startReceive();
 }
 
-void ProtocolHandler::sendCommand(const std::string& command) {
-    client_->write(command + "\r\n");
-}
-
-ProtocolResponse ProtocolHandler::waitForResponse(const std::string& command, int timeout_ms) {
-    ProtocolResponse response;
-    if (!responseQueue_.try_pop(response, timeout_ms)) {
-        throw TimeoutException("Response timeout for command: " + command);
-    }
-    return response;
-}
-
-void ProtocolHandler::handleRead(const std::string& message) {
-    try {
-        ProtocolResponse response = parseResponse(message);
-        responseQueue_.push(response);
-    } catch (const ProtocolException& e) {
-        spdlog::error("Protocol error during message handling: {}", e.what());
-    }
-}
-
-void ProtocolHandler::handleError(const std::string& message) {
-    spdlog::error("Communication error: {}", message);
-    throw ConnectionException(message);
-}
-
-ProtocolResponse ProtocolHandler::parseResponse(const std::string& response_str) {
-    ProtocolResponse response;
-    std::string clean_response = response_str;
-    if (!clean_response.empty() && clean_response.back() == '\r') {
-        clean_response.pop_back();
+void ProtocolHandler::sendCommand(const std::string& command, std::function<void(const ProtocolResponse&)> callback) {
+    if (command.empty()) {
+        spdlog::warn("빈 명령어를 전송할 수 없습니다.");
+        return;
     }
 
-    std::stringstream ss(clean_response);
+    std::string full_command = command + "\r\n";
+    std::string command_name = command.substr(0, 3);
+
+    // 콜백 등록
+    if (callback) {
+        std::lock_guard<std::mutex> lock(callbackMutex_);
+        responseCallbacks_[command_name] = callback;
+    }
+
+    client_->asyncWrite(full_command, [command_name](const boost::system::error_code& error, size_t bytes_transferred) {
+        if (!error) {
+            spdlog::debug("명령어 '{}' 전송 완료: {} 바이트", command_name, bytes_transferred);
+        } else {
+            spdlog::error("명령어 '{}' 전송 실패: {}", command_name, error.message());
+        }
+    });
+}
+
+void ProtocolHandler::startReceive() {
+    client_->asyncRead([this](const boost::system::error_code& error, const std::string& data) {
+        if (!error) {
+            spdlog::debug("데이터 수신: {}", data);
+            try {
+                ProtocolResponse response = parseResponse(data);
+                handleResponse(response);
+            } catch (const ProtocolException& e) {
+                spdlog::error("프로토콜 오류: {}", e.what());
+            }
+            // 다음 비동기 수신을 시작
+            startReceive();
+        } else if (error == boost::asio::error::eof) {
+            spdlog::warn("서버 연결이 끊어졌습니다.");
+            // TODO: 연결 끊김 처리 (재연결 시도 등)
+        } else {
+            spdlog::error("읽기 오류: {}", error.message());
+        }
+    });
+}
+
+ProtocolResponse ProtocolHandler::parseResponse(const std::string& raw_data) {
+    ProtocolResponse res;
+    // 응답 형식: S,CMD,param1,param2... 또는 C,CMD,param1...
+    // 예: C,RDP,0000001000
+    std::stringstream ss(raw_data);
     std::string segment;
     std::vector<std::string> segments;
 
-    while (std::getline(ss, segment, '\t')) {
+    while (std::getline(ss, segment, ',')) {
         segments.push_back(segment);
     }
 
     if (segments.empty()) {
-        throw ProtocolException("Empty or invalid response received.");
+        throw ProtocolException("응답 형식이 올바르지 않습니다: 응답 세그먼트가 없습니다.");
     }
 
-    response.status = segments[0][0];
-    response.command = "";
-    response.axis_no = -1;
-
+    res.status = segments[0][0];
     if (segments.size() > 1) {
-        std::string command_segment = segments[1];
-        std::smatch match;
-        std::regex command_regex("^([A-Z]+)([0-9]*)$");
-
-        if (std::regex_match(command_segment, match, command_regex)) {
-            response.command = match[1];
-            if (match.size() > 2 && !match[2].str().empty()) {
-                response.axis_no = std::stoi(match[2]);
-            }
-        }
+        res.command = segments[1];
     }
-
     if (segments.size() > 2) {
+        // 첫 번째 파라미터가 축 번호일 경우
+        try {
+            res.axis_no = boost::lexical_cast<int>(segments[2]);
+        } catch (const boost::bad_lexical_cast& e) {
+            // 파라미터가 숫자가 아니거나, 축 번호가 아닌 경우
+        }
         for (size_t i = 2; i < segments.size(); ++i) {
-            response.params.push_back(segments[i]);
+            res.params.push_back(segments[i]);
         }
     }
 
-    if (response.status == 'E' || response.status == 'W') {
-        if (!response.params.empty()) {
-            std::string code = response.params[0];
-            if (errorMessages_.count(code)) {
-                spdlog::error("Controller response error: {} - {}", code, errorMessages_[code]);
-            }
-        }
-        if (response.status == 'E') {
-            throw ProtocolException("Controller responded with an error.");
-        }
+    return res;
+}
+
+void ProtocolHandler::handleResponse(const ProtocolResponse& response) {
+    std::lock_guard<std::mutex> lock(callbackMutex_);
+    if (responseCallbacks_.count(response.command)) {
+        responseCallbacks_[response.command](response);
+        // 일회용 콜백은 삭제
+        responseCallbacks_.erase(response.command);
+    } else {
+        spdlog::warn("명령 {}에 대한 등록된 콜백이 없습니다. 무시.", response.command);
     }
-
-    return response;
-}
-
-void ProtocolHandler::loadErrorMessages() {
-    errorMessages_["100"] = "Total number of parameters is incorrect.";
-    errorMessages_["101"] = "Parameter type or value is incorrect.";
-    errorMessages_["102"] = "Command is undefined.";
-    // TODO: Add all error/warning codes from the manual.
-}
-
-void ProtocolHandler::validateParameters(const std::string& command, const std::vector<std::string>& params) {
-    // This function validates the parameters for each command.
-    // The validation logic for APS, RPS, and RDP, as specified in the design document, should be implemented here.
-}
-
-void ProtocolHandler::moveAbsolute(int axis_no, int position, int speed = 0, int response_type = 0) {
-    // TODO: Add parameter validation logic
-    std::string cmd = "APS" + std::to_string(axis_no) + "/" + std::to_string(speed) + "/" + std::to_string(position) + "/" + std::to_string(response_type);
-    sendCommand(cmd);
-}
-
-void ProtocolHandler::moveRelative(int axis_no, int distance, int speed = 0, int response_type = 0) {
-    // TODO: Add parameter validation logic
-    std::string cmd = "RPS" + std::to_string(axis_no) + "/" + std::to_string(speed) + "/" + std::to_string(distance) + "/" + std::to_string(response_type);
-    sendCommand(cmd);
-}
-
-std::string ProtocolHandler::readPosition(int axis_no) {
-    // TODO: Add parameter validation logic
-    std::string cmd = "RDP" + std::to_string(axis_no);
-    sendCommand(cmd);
-
-    ProtocolResponse response = waitForResponse("RDP", 5000); // 5 sec timeout
-    if (response.status == 'C' && response.command == "RDP" && response.axis_no == axis_no && !response.params.empty()) {
-        return response.params[0];
-    }
-    throw ProtocolException("Invalid response for RDP command.");
 }
