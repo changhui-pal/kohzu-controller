@@ -121,15 +121,15 @@ void ProtocolHandler::validateParameters(const std::string& command, const std::
     // The validation logic for APS, RPS, and RDP, as specified in the design document, should be implemented here.
 }
 
-void ProtocolHandler::moveAbsolute(int axis_no, int position, int speed, int response_type) {
+void ProtocolHandler::moveAbsolute(int axis_no, int position, int speed = 0, int response_type = 0) {
     // TODO: Add parameter validation logic
-    std::string cmd = "APS" + std::to_string(axis_no) + "/" + std::to_string(position) + "/" + std::to_string(speed) + "/" + std::to_string(response_type);
+    std::string cmd = "APS" + std::to_string(axis_no) + "/" + std::to_string(speed) + "/" + std::to_string(position) + "/" + std::to_string(response_type);
     sendCommand(cmd);
 }
 
-void ProtocolHandler::moveRelative(int axis_no, int distance, int speed, int response_type) {
+void ProtocolHandler::moveRelative(int axis_no, int distance, int speed = 0, int response_type = 0) {
     // TODO: Add parameter validation logic
-    std::string cmd = "RPS" + std::to_string(axis_no) + "/" + std::to_string(distance) + "/" + std::to_string(speed) + "/" + std::to_string(response_type);
+    std::string cmd = "RPS" + std::to_string(axis_no) + "/" + std::to_string(speed) + "/" + std::to_string(distance) + "/" + std::to_string(response_type);
     sendCommand(cmd);
 }
 
