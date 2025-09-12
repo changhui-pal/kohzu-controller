@@ -48,8 +48,8 @@ void handleRpsCommand(std::istringstream& iss, const std::shared_ptr<KohzuContro
 void handleRdpCommand(std::istringstream& iss, const std::shared_ptr<KohzuController>& controller) {
     int axis_no;
     if (iss >> axis_no) {
-        std::string position = controller->readCurrentPosition(axis_no);
-        spdlog::info("현재 위치: {}", position);
+        // 비동기 방식으로 변경, 반환 값을 받지 않고 함수만 호출
+        controller->readCurrentPosition(axis_no);
     } else {
         spdlog::error("잘못된 rdp 명령어 형식. 사용법: rdp <축번호>");
     }
