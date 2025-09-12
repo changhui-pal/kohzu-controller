@@ -36,8 +36,7 @@ add_executable(kohzu_controller ${SOURCE_FILES})
 
 # 라이브러리 링크
 target_link_libraries(kohzu_controller PRIVATE
-    Boost::asio
-    Boost::system
+    Boost::boost
     spdlog::spdlog
 )
 
