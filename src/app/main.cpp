@@ -14,7 +14,9 @@
 #include <sstream>
 #include <boost/asio.hpp>
 
-// 사용 가능한 명령어를 화면에 표시하는 함수
+/**
+ * @brief 사용 가능한 명령어를 화면에 표시하는 함수
+ */
 void showHelp() {
     std::cout << "사용 가능한 명령어:\n";
     std::cout << "  aps <축번호> <위치> <속도> <응답타입>  - 절대 위치로 이동\n";
@@ -24,7 +26,11 @@ void showHelp() {
     std::cout << "  help                                     - 도움말 표시\n";
 }
 
-// aps 명령어를 처리하는 함수
+/**
+ * @brief 'aps' 명령어를 처리하는 함수
+ * @param iss 입력 스트림
+ * @param controller KohzuController 객체
+ */
 void handleApsCommand(std::istringstream& iss, const std::shared_ptr<KohzuController>& controller) {
     int axis_no, position, speed, response_type;
     if (iss >> axis_no >> position >> speed >> response_type) {
@@ -34,7 +40,11 @@ void handleApsCommand(std::istringstream& iss, const std::shared_ptr<KohzuContro
     }
 }
 
-// rps 명령어를 처리하는 함수
+/**
+ * @brief 'rps' 명령어를 처리하는 함수
+ * @param iss 입력 스트림
+ * @param controller KohzuController 객체
+ */
 void handleRpsCommand(std::istringstream& iss, const std::shared_ptr<KohzuController>& controller) {
     int axis_no, distance, speed, response_type;
     if (iss >> axis_no >> distance >> speed >> response_type) {
@@ -44,11 +54,14 @@ void handleRpsCommand(std::istringstream& iss, const std::shared_ptr<KohzuContro
     }
 }
 
-// rdp 명령어를 처리하는 함수
+/**
+ * @brief 'rdp' 명령어를 처리하는 함수
+ * @param iss 입력 스트림
+ * @param controller KohzuController 객체
+ */
 void handleRdpCommand(std::istringstream& iss, const std::shared_ptr<KohzuController>& controller) {
     int axis_no;
     if (iss >> axis_no) {
-        // 비동기 방식으로 변경, 반환 값을 받지 않고 함수만 호출
         controller->readCurrentPosition(axis_no);
     } else {
         spdlog::error("잘못된 rdp 명령어 형식. 사용법: rdp <축번호>");
