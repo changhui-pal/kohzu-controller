@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # Boost 라이브러리 찾기 (asio, system)
-find_package(Boost REQUIRED COMPONENTS asio system)
+find_package(Boost REQUIRED)
 if(NOT Boost_FOUND)
     message(FATAL_ERROR "Boost not found. Please install Boost libraries.")
 endif()
