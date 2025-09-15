@@ -1,66 +1,71 @@
 #pragma once
 
 #include "protocol/ProtocolHandler.h"
+#include "controller/AxisState.h" // Include the new AxisState header
 #include <memory>
-#include <future>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <vector>
 
 /**
  * @class KohzuController
- * @brief High-level controller for a KOHZU motion control system.
+ * @brief Handles the high-level control logic for the Kohzu ARIES/LYNX motion controller.
  *
- * This class provides a user-friendly API to control motors by
- * interacting with the ProtocolHandler.
+ * This class translates user commands into the specific communication protocol
+ * required by the controller and manages the asynchronous command flow.
  */
 class KohzuController {
 public:
     /**
-     * @brief Constructor for the KohzuController.
-     * @param handler A shared pointer to a ProtocolHandler instance.
+     * @brief Constructs a KohzuController object.
+     * @param protocolHandler A shared pointer to the ProtocolHandler instance.
+     * @param axisState A shared pointer to the AxisState instance for status management.
      */
-    explicit KohzuController(std::shared_ptr<ProtocolHandler> handler);
+    explicit KohzuController(std::shared_ptr<ProtocolHandler> protocolHandler, std::shared_ptr<AxisState> axisState);
 
     /**
-     * @brief Starts the controller, typically by initializing communication.
+     * @brief Initializes the controller's communication by starting the protocol handler.
      */
     void start();
 
     /**
-     * @brief Sends an absolute move command to a specific axis.
-     * @param axis_no The axis number to control.
+     * @brief Starts periodic status monitoring for specified axes.
+     * @param axes_to_monitor A vector of axis numbers to monitor.
+     * @param period_ms The monitoring period in milliseconds.
+     */
+    void startMonitoring(const std::vector<int>& axes_to_monitor, int period_ms);
+
+    /**
+     * @brief Stops periodic status monitoring.
+     */
+    void stopMonitoring();
+
+    /**
+     * @brief Commands the specified axis to move to an absolute position.
+     * @param axis_no The axis number to move.
      * @param position The target absolute position.
-     * @param speed The speed of the movement.
-     * @param response_type The response type (0 for completion, 1 for submission).
+     * @param speed The movement speed. Defaults to 0 if not provided.
+     * @param response_type The response type. Defaults to 0 if not provided.
      */
-    void moveAbsolute(int axis_no, int position, int speed, int response_type);
+    void moveAbsolute(int axis_no, int position, int speed = 0, int response_type = 0);
 
     /**
-     * @brief Sends a relative move command to a specific axis.
-     * @param axis_no The axis number to control.
-     * @param distance The distance to move relative to the current position.
-     * @param speed The speed of the movement.
-     * @param response_type The response type (0 for completion, 1 for submission).
+     * @brief Commands the specified axis to move by a relative distance.
+     * @param axis_no The axis number to move.
+     * @param distance The relative distance to move.
+     * @param speed The movement speed. Defaults to 0 if not provided.
+     * @param response_type The response type. Defaults to 0 if not provided.
      */
-    void moveRelative(int axis_no, int distance, int speed, int response_type);
-
-    /**
-     * @brief Reads the current position of a specific axis.
-     * @param axis_no The axis number to read from.
-     */
-    void readCurrentPosition(int axis_no);
-
-    /**
-     * @brief Reads the last error from the controller.
-     */
-    void readLastError();
-
-    /**
-     * @brief Starts a periodic monitoring task for a given axis position.
-     * @param axis_no The axis to monitor.
-     * @param interval_ms The monitoring interval in milliseconds.
-     * @return A future that can be used to manage the monitoring task.
-     */
-    std::future<void> startPositionMonitor(int axis_no, int interval_ms);
+    void moveRelative(int axis_no, int distance, int speed = 0, int response_type = 0);
 
 private:
+    void monitorThreadFunction(int period_ms);
+    
     std::shared_ptr<ProtocolHandler> protocolHandler_;
+    std::shared_ptr<AxisState> axisState_;
+
+    std::atomic<bool> monitoring_running_{false};
+    std::unique_ptr<std::thread> monitoring_thread_;
+    std::vector<int> axes_to_monitor_;
 };

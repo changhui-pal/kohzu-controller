@@ -1,153 +1,232 @@
 #include "controller/KohzuController.h"
-#include "core/TcpClient.h"
-#include "protocol/ProtocolHandler.h"
+#include "controller/AxisState.h" // Include the new AxisState header
 #include "spdlog/spdlog.h"
-#include "protocol/exceptions/ConnectionException.h"
-#include "protocol/exceptions/ProtocolException.h"
-#include "protocol/exceptions/TimeoutException.h"
 #include <iostream>
-#include <memory>
-#include <thread>
-#include <stdexcept>
 #include <string>
 #include <vector>
-#include <sstream>
-#include <boost/asio.hpp>
+#include <memory>
+#include <thread>
+#include <chrono>
+#include <future>
+#include <stdexcept>
 
-/**
- * @brief Displays a list of available commands.
- */
-void showHelp() {
-    std::cout << "Available commands:\n";
-    std::cout << "  aps <axis_no> <position> <speed> <response_type>  - Move to absolute position\n";
-    std::cout << "  rps <axis_no> <distance> <speed> <response_type>  - Move relative to current position\n";
-    std::cout << "  rdp <axis_no>                                     - Read current position\n";
-    std::cout << "  cerr                                              - Read the last controller error\n";
-    std::cout << "  exit                                              - Exit the program\n";
-    std::cout << "  help                                              - Show this help message\n";
-}
+// Function prototypes
+void handleUserInput(const std::shared_ptr<KohzuController>& controller, const std::shared_ptr<AxisState>& axisState, const std::string& input);
+void handleCommand(const std::string& command, const std::vector<std::string>& args,
+                   const std::shared_ptr<KohzuController>& controller, const std::shared_ptr<AxisState>& axisState);
+void handleApsCommand(const std::shared_ptr<KohzuController>& controller, const std::shared_ptr<AxisState>& axisState, const std::vector<std::string>& args);
+void handleRpsCommand(const std::shared_ptr<KohzuController>& controller, const std::shared_ptr<AxisState>& axisState, const std::vector<std::string>& args);
+void handleRdpCommand(const std::shared_ptr<AxisState>& axisState, const std::vector<std::string>& args);
+void handleStartMonitoringCommand(const std::shared_ptr<KohzuController>& controller, const std::vector<std::string>& args);
 
-/**
- * @brief Handles the 'aps' command.
- * @param iss Input stream
- * @param controller KohzuController object
- */
-void handleApsCommand(std::istringstream& iss, const std::shared_ptr<KohzuController>& controller) {
-    int axis_no, position, speed, response_type;
-    if (iss >> axis_no >> position >> speed >> response_type) {
-        controller->moveAbsolute(axis_no, position, speed, response_type);
-    } else {
-        spdlog::error("Invalid aps command format. Usage: aps <axis_no> <position> <speed> <response_type>");
-    }
-}
-
-/**
- * @brief Handles the 'rps' command.
- * @param iss Input stream
- * @param controller KohzuController object
- */
-void handleRpsCommand(std::istringstream& iss, const std::shared_ptr<KohzuController>& controller) {
-    int axis_no, distance, speed, response_type;
-    if (iss >> axis_no >> distance >> speed >> response_type) {
-        controller->moveRelative(axis_no, distance, speed, response_type);
-    } else {
-        spdlog::error("Invalid rps command format. Usage: rps <axis_no> <distance> <speed> <response_type>");
-    }
-}
-
-/**
- * @brief Handles the 'rdp' command.
- * @param iss Input stream
- * @param controller KohzuController object
- */
-void handleRdpCommand(std::istringstream& iss, const std::shared_ptr<KohzuController>& controller) {
-    int axis_no;
-    if (iss >> axis_no) {
-        controller->readCurrentPosition(axis_no);
-    } else {
-        spdlog::error("Invalid rdp command format. Usage: rdp <axis_no>");
-    }
-}
-
-/**
- * @brief Handles the 'cerr' command.
- * @param iss Input stream
- * @param controller KohzuController object
- */
-void handleCerrCommand(const std::shared_ptr<KohzuController>& controller) {
-    controller->readLastError();
-}
+// Function to print axis state during a command operation
+void monitorAndPrint(const std::shared_ptr<AxisState>& axisState, int axis_no, std::future<void> future);
 
 int main() {
-    // Spdlog setup
-    spdlog::set_level(spdlog::level::debug);
+    // Set up logging
+    spdlog::set_level(spdlog::level::info);
+
     spdlog::info("Starting Kohzu controller project initialization.");
 
-    boost::asio::io_context io_context;
-    boost::asio::io_context::work work(io_context);
-    std::thread io_thread([&io_context]() { io_context.run(); });
-
-    std::shared_ptr<TcpClient> client;
-    std::shared_ptr<ProtocolHandler> protocolHandler;
-    std::shared_ptr<KohzuController> controller;
-
     try {
-        // Create and inject dependency objects
-        client = std::make_shared<TcpClient>(io_context, "192.168.1.120", "12321");
-        protocolHandler = std::make_shared<ProtocolHandler>(client);
-        controller = std::make_shared<KohzuController>(protocolHandler);
+        // Boost.Asio I/O context and TcpClient setup
+        boost::asio::io_context io_context;
+        auto client = std::make_shared<TcpClient>(io_context, "192.168.1.120", "12321");
+        spdlog::info("TcpClient object created: {}:{}", "192.168.1.120", "12321");
 
-        // Start TCP connection
+        // ProtocolHandler, AxisState, and KohzuController setup
+        auto protocolHandler = std::make_shared<ProtocolHandler>(client);
+        spdlog::info("ProtocolHandler object created.");
+        auto axisState = std::make_shared<AxisState>();
+        auto controller = std::make_shared<KohzuController>(protocolHandler, axisState);
+        spdlog::info("KohzuController object created.");
+
+        // Connect to the server
         client->connect("192.168.1.120", "12321");
+        
+        // Start the I/O context thread to run async operations
+        std::thread io_thread([&io_context]() {
+            io_context.run();
+        });
 
-        // Start controller logic
         controller->start();
 
-    } catch (const std::exception& e) {
-        spdlog::critical("Fatal error during initialization: {}", e.what());
-        // If an exception occurs, stop io_context to terminate the thread.
+        // Main command loop
+        std::cout << "Enter 'help' for available commands." << std::endl;
+        std::string input;
+        while (std::getline(std::cin, input) && input != "exit") {
+            handleUserInput(controller, axisState, input);
+        }
+
+        controller->stopMonitoring();
+
+        spdlog::info("Program exited gracefully.");
         io_context.stop();
         if (io_thread.joinable()) {
             io_thread.join();
         }
+
+    } catch (const std::exception& e) {
+        spdlog::error("Exception: {}", e.what());
         return 1;
     }
 
-    // A simple loop to take user input and execute commands
-    std::string input;
-    std::cout << "Enter 'help' for available commands.\n";
-    while (std::cout << "> " && std::getline(std::cin, input)) {
-        std::istringstream iss(input);
-        std::string command;
-        iss >> command;
-
-        try {
-            if (command == "exit") {
-                break;
-            } else if (command == "help") {
-                showHelp();
-            } else if (command == "aps") {
-                handleApsCommand(iss, controller);
-            } else if (command == "rps") {
-                handleRpsCommand(iss, controller);
-            } else if (command == "rdp") {
-                handleRdpCommand(iss, controller);
-            } else if (command == "cerr") {
-                handleCerrCommand(controller);
-            } else {
-                spdlog::warn("Unknown command. Enter 'help' to see available commands.");
-            }
-        } catch (const std::exception& e) {
-            spdlog::error("An error occurred: {}", e.what());
-        }
-    }
-
-    // Release resources upon program exit
-    io_context.stop();
-    if (io_thread.joinable()) {
-        io_thread.join();
-    }
-    spdlog::info("Program exited gracefully.");
-
     return 0;
+}
+
+void handleUserInput(const std::shared_ptr<KohzuController>& controller, const std::shared_ptr<AxisState>& axisState, const std::string& input) {
+    std::stringstream ss(input);
+    std::string command;
+    ss >> command;
+
+    std::vector<std::string> args;
+    std::string arg;
+    while (ss >> arg) {
+        args.push_back(arg);
+    }
+    handleCommand(command, args, controller, axisState);
+}
+
+void handleCommand(const std::string& command, const std::vector<std::string>& args,
+                   const std::shared_ptr<KohzuController>& controller, const std::shared_ptr<AxisState>& axisState) {
+    if (command == "aps") {
+        handleApsCommand(controller, axisState, args);
+    } else if (command == "rps") {
+        handleRpsCommand(controller, axisState, args);
+    } else if (command == "rdp") {
+        handleRdpCommand(axisState, args);
+    } else if (command == "start_monitor") {
+        handleStartMonitoringCommand(controller, args);
+    } else if (command == "help") {
+        std::cout << "Available commands:\n"
+                  << "  start_monitor [axis1] [axis2] ...\n"
+                  << "  aps [axis_no] [position] [speed]\n"
+                  << "  rps [axis_no] [distance] [speed]\n"
+                  << "  rdp [axis_no] (reads from state cache)\n"
+                  << "  exit\n";
+    } else {
+        std::cout << "Unknown command. Type 'help' for a list of commands.\n";
+    }
+}
+
+void handleApsCommand(const std::shared_ptr<KohzuController>& controller, const std::shared_ptr<AxisState>& axisState, const std::vector<std::string>& args) {
+    if (args.size() < 2 || args.size() > 3) {
+        std::cout << "Usage: aps [axis_no] [position] [speed (optional)]\n";
+        return;
+    }
+    try {
+        int axis_no = std::stoi(args[0]);
+        int position = std::stoi(args[1]);
+        int speed = args.size() > 2 ? std::stoi(args[2]) : 0;
+        
+        // Use a promise/future to know when the command completes
+        std::promise<void> promise;
+        std::future<void> future = promise.get_future();
+
+        // Pass a callback to the controller that fulfills the promise
+        controller->moveAbsolute(axis_no, position, speed, 0,
+            [&promise](const ProtocolResponse& response) {
+                if (response.status == 'C') {
+                    spdlog::info("Absolute move command for axis {} completed.", response.axis_no);
+                } else {
+                    spdlog::error("Absolute move command for axis {} failed with status: {}", response.axis_no, response.status);
+                }
+                promise.set_value(); // Fulfill the promise to signal completion
+            });
+            
+        // Start monitoring and printing position
+        monitorAndPrint(axisState, axis_no, std::move(future));
+
+    } catch (const std::exception& e) {
+        std::cout << "Invalid arguments. Please enter integers.\n";
+    }
+}
+
+void handleRpsCommand(const std::shared_ptr<KohzuController>& controller, const std::shared_ptr<AxisState>& axisState, const std::vector<std::string>& args) {
+    if (args.size() < 2 || args.size() > 3) {
+        std::cout << "Usage: rps [axis_no] [distance] [speed (optional)]\n";
+        return;
+    }
+    try {
+        int axis_no = std::stoi(args[0]);
+        int distance = std::stoi(args[1]);
+        int speed = args.size() > 2 ? std::stoi(args[2]) : 0;
+        
+        // Use a promise/future to know when the command completes
+        std::promise<void> promise;
+        std::future<void> future = promise.get_future();
+
+        // Pass a callback to the controller that fulfills the promise
+        controller->moveRelative(axis_no, distance, speed, 0,
+            [&promise](const ProtocolResponse& response) {
+                if (response.status == 'C') {
+                    spdlog::info("Relative move command for axis {} completed.", response.axis_no);
+                } else {
+                    spdlog::error("Relative move command for axis {} failed with status: {}", response.axis_no, response.status);
+                }
+                promise.set_value(); // Fulfill the promise to signal completion
+            });
+
+        // Start monitoring and printing position
+        monitorAndPrint(axisState, axis_no, std::move(future));
+    } catch (const std::exception& e) {
+        std::cout << "Invalid arguments. Please enter integers.\n";
+    }
+}
+
+void handleRdpCommand(const std::shared_ptr<AxisState>& axisState, const std::vector<std::string>& args) {
+    if (args.size() != 1) {
+        std::cout << "Usage: rdp [axis_no]\n";
+        return;
+    }
+    try {
+        int axis_no = std::stoi(args[0]);
+        int position = axisState->getPosition(axis_no);
+        AxisStatus status = axisState->getStatusDetails(axis_no);
+        std::cout << "Current Position (cached): " << position << "\n";
+        std::cout << "Current Status (cached):\n";
+        std::cout << "  - Driving State: " << status.driving_state << "\n";
+        std::cout << "  - EMG Signal: " << status.emg_signal << "\n";
+        std::cout << "  - ORG/NORG Signal: " << status.org_norg_signal << "\n";
+        std::cout << "  - CW/CCW Limit: " << status.cw_ccw_limit_signal << "\n";
+        std::cout << "  - Soft Limit State: " << status.soft_limit_state << "\n";
+        std::cout << "  - Correction Range: " << status.correction_allowable_range << "\n";
+    } catch (const std::exception& e) {
+        std::cout << "Invalid argument. Please enter an integer.\n";
+    }
+}
+
+void handleStartMonitoringCommand(const std::shared_ptr<KohzuController>& controller, const std::vector<std::string>& args) {
+    if (args.empty()) {
+        std::cout << "Usage: start_monitor [axis1] [axis2] ...\n";
+        return;
+    }
+
+    std::vector<int> axes;
+    try {
+        for (const auto& arg : args) {
+            axes.push_back(std::stoi(arg));
+        }
+    } catch (const std::exception& e) {
+        std::cout << "Invalid arguments. Please enter integers for axis numbers.\n";
+        return;
+    }
+
+    controller->startMonitoring(axes, 100); // Start monitoring with a 100ms period
+}
+
+// Monitors axis position at a 100ms interval until the command completes
+void monitorAndPrint(const std::shared_ptr<AxisState>& axisState, int axis_no, std::future<void> future) {
+    std::cout << "Monitoring axis " << axis_no << " position..." << std::endl;
+    auto start_time = std::chrono::steady_clock::now();
+    
+    while (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+        int current_position = axisState->getPosition(axis_no);
+        std::cout << "  -> Position: " << current_position << "\n";
+        // To avoid flooding the console, wait a bit before the next check.
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    
+    std::cout << "Monitoring complete." << std::endl;
+    std::cout << "Final position: " << axisState->getPosition(axis_no) << std::endl;
 }
