@@ -67,4 +67,5 @@ private:
     std::shared_ptr<ICommunicationClient> client_;
     std::map<std::string, ThreadSafeQueue<std::function<void(const ProtocolResponse&)>>> response_callbacks_;
     std::atomic<bool> is_reading_ = false;
+    std::mutex callback_mutex_; // Protects the response_callbacks_ map
 };

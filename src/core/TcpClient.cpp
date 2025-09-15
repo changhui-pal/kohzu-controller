@@ -1,63 +1,77 @@
 #include "core/TcpClient.h"
-#include "protocol/exceptions/ConnectionException.h"
 #include "spdlog/spdlog.h"
+#include "protocol/exceptions/ConnectionException.h"
 #include <iostream>
+#include <boost/asio.hpp>
 
+/**
+ * @brief Constructor for TcpClient.
+ * @param io_context The Boost.Asio I/O context.
+ * @param host The hostname or IP address to connect to.
+ * @param port The port number to connect to.
+ */
 TcpClient::TcpClient(boost::asio::io_context& io_context, const std::string& host, const std::string& port)
-    : io_context_(io_context), socket_(io_context), resolver_(io_context), host_(host), port_(port), read_buffer_(1024) {
+    : socket_(io_context),
+      resolver_(io_context) {
     spdlog::info("TcpClient 객체 생성: {}:{}", host, port);
 }
 
-TcpClient::~TcpClient() {
-    boost::system::error_code ec;
-    socket_.close(ec);
-    if (ec) {
-        spdlog::error("소켓 닫기 오류: {}", ec.message());
-    }
-}
-
+/**
+ * @brief Connects to the specified host and port.
+ * @param host The hostname or IP address.
+ * @param port The port number.
+ */
 void TcpClient::connect(const std::string& host, const std::string& port) {
     try {
-        tcp::resolver::results_type endpoints = resolver_.resolve(host, port);
-        boost::asio::connect(socket_, endpoints);
+        boost::asio::connect(socket_, resolver_.resolve(host, port));
         spdlog::info("서버에 성공적으로 연결되었습니다: {}:{}", host, port);
     } catch (const boost::system::system_error& e) {
         throw ConnectionException("연결 실패: " + std::string(e.what()));
     }
 }
 
-void TcpClient::asyncWrite(const std::string& data) {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    boost::asio::async_write(socket_, boost::asio::buffer(data),
-        [this](const boost::system::error_code& error, size_t bytes_transferred) {
-        if (error) {
-            spdlog::error("쓰기 오류: {}", error.message());
-        } else {
-            spdlog::debug("데이터 {} 바이트 전송 완료.", bytes_transferred);
-        }
-    });
-}
-
+/**
+ * @brief Asynchronously reads data from the socket.
+ * @param callback The callback function to be called when data is received.
+ */
 void TcpClient::asyncRead(std::function<void(const std::string&)> callback) {
-    read_callback_ = callback;
-    doRead();
+    // Start a new async read operation
+    boost::asio::async_read_until(socket_, response_buffer_, '\n',
+        [this, callback](const boost::system::error_code& error, std::size_t bytes_transferred) {
+            if (!error) {
+                std::string received_data;
+                // Move data from the buffer to the string until the delimiter is found
+                std::istream is(&response_buffer_);
+                std::getline(is, received_data);
+                
+                // Add the delimiter back to the string
+                received_data += '\n';
+
+                // Call the user-provided callback
+                callback(received_data);
+
+                // Continue reading
+                this->asyncRead(callback);
+            } else if (error == boost::asio::error::eof || error == boost::asio::error::connection_reset) {
+                // Handle disconnection
+                spdlog::warn("서버 연결이 종료되었습니다.");
+            } else {
+                spdlog::error("비동기 읽기 오류: {}", error.message());
+            }
+        });
 }
 
-void TcpClient::doRead() {
-    boost::asio::async_read_until(socket_, boost::asio::dynamic_buffer(read_data_), '\n',
-        [this](const boost::system::error_code& error, size_t bytes_transferred) {
-        if (!error) {
-            read_data_.resize(read_data_.size() - 2); // Remove \r\n
-            if (read_callback_) {
-                read_callback_(read_data_);
+/**
+ * @brief Asynchronously writes data to the socket.
+ * @param data The string data to be sent.
+ */
+void TcpClient::asyncWrite(const std::string& data) {
+    boost::asio::async_write(socket_, boost::asio::buffer(data),
+        [this, data](const boost::system::error_code& error, std::size_t bytes_transferred) {
+            if (!error) {
+                spdlog::debug("데이터 {} 바이트 전송 완료.", bytes_transferred);
+            } else {
+                spdlog::error("비동기 쓰기 오류: {}", error.message());
             }
-            read_data_.clear();
-            doRead(); // 다음 읽기 작업 시작
-        } else if (error == boost::asio::error::eof || error == boost::asio::error::connection_reset) {
-            spdlog::error("연결 종료: {}", error.message());
-            // TODO: 재연결 로직 추가
-        } else {
-            spdlog::error("읽기 오류: {}", error.message());
-        }
-    });
+        });
 }

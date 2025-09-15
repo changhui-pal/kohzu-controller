@@ -68,8 +68,14 @@ void ProtocolHandler::sendCommand(const std::string& base_command, int axis_no, 
     }
     full_command += "\r\n";
     
+    // Protect the map access with a lock
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    
     // Push the callback into the queue for the specific command and axis
     response_callbacks_[generateResponseKey(base_command, axis_no)].push(callback);
+    
+    // Log the full command being sent
+    spdlog::info("Sending command: {}", full_command);
 
     client_->asyncWrite(full_command);
 }
@@ -79,11 +85,17 @@ void ProtocolHandler::sendCommand(const std::string& base_command, int axis_no, 
  * @param response_data The received response string.
  */
 void ProtocolHandler::handleRead(const std::string& response_data) {
+    // Log the raw received data
+    spdlog::info("Received raw data: {}", response_data);
+    
     try {
         ProtocolResponse response = parseResponse(response_data);
         spdlog::info("Received response: {}", response.full_response);
 
         std::string response_key = generateResponseKey(response.command, response.axis_no);
+        
+        // Protect the map access with a lock
+        std::lock_guard<std::mutex> lock(callback_mutex_);
         
         // Find the matching queue for the received response
         auto it = response_callbacks_.find(response_key);

@@ -2,40 +2,47 @@
 
 #include "ICommunicationClient.h"
 #include <boost/asio.hpp>
-#include <string>
-#include <functional>
-#include <memory>
-#include <mutex>
-
-using namespace boost::asio;
-using ip::tcp;
 
 /**
  * @class TcpClient
- * @brief TCP/IP 통신을 위한 클라이언트 클래스.
- * ICommunicationClient 인터페이스를 구현하며, Boost.Asio를 사용해 비동기 통신을 처리합니다.
+ * @brief Handles TCP client communication using Boost.Asio.
+ *
+ * This class provides asynchronous read and write capabilities over a TCP
+ * connection, abstracting the low-level socket operations.
  */
 class TcpClient : public ICommunicationClient {
 public:
+    /**
+     * @brief Constructor for TcpClient.
+     * @param io_context The Boost.Asio I/O context.
+     * @param host The hostname or IP address to connect to.
+     * @param port The port number to connect to.
+     */
     TcpClient(boost::asio::io_context& io_context, const std::string& host, const std::string& port);
-    ~TcpClient();
+    
+    // Disable copy constructor and assignment operator
+    TcpClient(const TcpClient&) = delete;
+    TcpClient& operator=(const TcpClient&) = delete;
 
+    /**
+     * @brief Connects to the specified host and port.
+     */
     void connect(const std::string& host, const std::string& port) override;
-    void asyncWrite(const std::string& data) override;
+
+    /**
+     * @brief Asynchronously reads data from the socket.
+     * @param callback The callback function to be called when data is received.
+     */
     void asyncRead(std::function<void(const std::string&)> callback) override;
 
-private:
-    void doConnect(const tcp::resolver::results_type& endpoints);
-    void doRead();
-    void doWrite(const std::string& data);
+    /**
+     * @brief Asynchronously writes data to the socket.
+     * @param data The string data to be sent.
+     */
+    void asyncWrite(const std::string& data) override;
 
-    boost::asio::io_context& io_context_;
-    tcp::socket socket_;
-    tcp::resolver resolver_;
-    std::string host_;
-    std::string port_;
-    std::vector<char> read_buffer_;
-    std::string read_data_;
-    std::function<void(const std::string&)> read_callback_;
-    std::mutex write_mutex_;
+private:
+    boost::asio::ip::tcp::socket socket_;
+    boost::asio::ip::tcp::resolver resolver_;
+    boost::asio::streambuf response_buffer_; // Buffer to handle fragmented reads
 };
