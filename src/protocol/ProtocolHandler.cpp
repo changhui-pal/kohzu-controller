@@ -115,7 +115,7 @@ void ProtocolHandler::handleRead(const std::string& response_data) {
  * @param response The response string to parse.
  * @return The parsed ProtocolResponse object.
  */
-ProtocolHandler::ProtocolResponse ProtocolHandler::parseResponse(const std::string& response) {
+ProtocolResponse ProtocolHandler::parseResponse(const std::string& response) {
     ProtocolResponse parsed;
     parsed.full_response = response;
     std::string cleaned_response = response;
