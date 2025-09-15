@@ -1,62 +1,63 @@
 #pragma once
 
 #include "protocol/ProtocolHandler.h"
-#include "protocol/exceptions/ConnectionException.h"
-#include "protocol/exceptions/ProtocolException.h"
-#include "protocol/exceptions/TimeoutException.h"
 #include <memory>
-#include <map>
-#include <string>
-#include <thread>
 #include <future>
 
 /**
  * @class KohzuController
- * @brief KOHZU 컨트롤러의 고수준 제어를 위한 인터페이스를 제공하는 클래스.
- * ProtocolHandler를 사용하여 실제 통신을 수행합니다.
+ * @brief High-level controller for a KOHZU motion control system.
+ *
+ * This class provides a user-friendly API to control motors by
+ * interacting with the ProtocolHandler.
  */
 class KohzuController {
 public:
     /**
-     * @brief KohzuController 클래스의 생성자.
-     * @param handler ProtocolHandler 객체의 공유 포인터.
+     * @brief Constructor for the KohzuController.
+     * @param handler A shared pointer to a ProtocolHandler instance.
      */
     explicit KohzuController(std::shared_ptr<ProtocolHandler> handler);
 
     /**
-     * @brief 컨트롤러 초기화를 시작하는 메서드.
+     * @brief Starts the controller, typically by initializing communication.
      */
     void start();
 
     /**
-     * @brief 지정된 축을 절대 위치로 이동시키는 메서드.
-     * @param axis_no 축 번호.
-     * @param position 절대 위치 값.
-     * @param speed 이동 속도.
-     * @param response_type 응답 타입 (0: 동작 완료 후 응답, 1: 명령 수신 후 즉시 응답).
+     * @brief Sends an absolute move command to a specific axis.
+     * @param axis_no The axis number to control.
+     * @param position The target absolute position.
+     * @param speed The speed of the movement.
+     * @param response_type The response type (0 for completion, 1 for submission).
      */
     void moveAbsolute(int axis_no, int position, int speed, int response_type);
 
     /**
-     * @brief 지정된 축을 상대 거리만큼 이동시키는 메서드.
-     * @param axis_no 축 번호.
-     * @param distance 상대 이동 거리.
-     * @param speed 이동 속도.
-     * @param response_type 응답 타입 (0: 동작 완료 후 응답, 1: 명령 수신 후 즉시 응답).
+     * @brief Sends a relative move command to a specific axis.
+     * @param axis_no The axis number to control.
+     * @param distance The distance to move relative to the current position.
+     * @param speed The speed of the movement.
+     * @param response_type The response type (0 for completion, 1 for submission).
      */
     void moveRelative(int axis_no, int distance, int speed, int response_type);
 
     /**
-     * @brief 지정된 축의 현재 위치를 읽고 로그를 출력하는 비동기 메서드.
-     * @param axis_no 축 번호.
+     * @brief Reads the current position of a specific axis.
+     * @param axis_no The axis number to read from.
      */
     void readCurrentPosition(int axis_no);
 
     /**
-     * @brief 지정된 축의 위치를 주기적으로 모니터링하는 비동기 메서드.
-     * @param axis_no 축 번호.
-     * @param interval_ms 모니터링 주기 (밀리초).
-     * @return 모니터링을 중지할 수 있는 future 객체.
+     * @brief Reads the last error from the controller.
+     */
+    void readLastError();
+
+    /**
+     * @brief Starts a periodic monitoring task for a given axis position.
+     * @param axis_no The axis to monitor.
+     * @param interval_ms The monitoring interval in milliseconds.
+     * @return A future that can be used to manage the monitoring task.
      */
     std::future<void> startPositionMonitor(int axis_no, int interval_ms);
 
