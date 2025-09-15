@@ -15,7 +15,10 @@
 
 /**
  * @struct ProtocolResponse
- * @brief 프로토콜 응답을 구조화하기 위한 데이터 구조체.
+ * @brief Data structure for a structured protocol response.
+ *
+ * This structure holds the parsed components of a response string, including
+ * the status, command, axis number (if present), and parameters.
  */
 struct ProtocolResponse {
     char status;
@@ -27,36 +30,57 @@ struct ProtocolResponse {
 
 /**
  * @class ProtocolHandler
- * @brief KOHZU 컨트롤러와의 통신 프로토콜을 처리하는 클래스.
- * 명령어를 포맷팅하고 응답을 파싱하는 역할을 담당합니다.
+ * @brief Handles the communication protocol with the KOHZU controller.
+ *
+ * This class is responsible for formatting commands according to the protocol
+ * specification and parsing incoming responses to a structured format. It also
+ * manages asynchronous command execution using callbacks.
  */
 class ProtocolHandler {
 public:
     /**
-     * @brief ProtocolHandler 클래스의 생성자.
-     * @param client 통신 클라이언트 객체의 공유 포인터.
+     * @brief Constructor for the ProtocolHandler class.
+     * @param client A shared pointer to the communication client object.
      */
     explicit ProtocolHandler(std::shared_ptr<ICommunicationClient> client);
 
     /**
-     * @brief 프로토콜 핸들러를 초기화하는 메서드.
+     * @brief Initializes the protocol handler.
      */
     void initialize();
 
     /**
-     * @brief 명령어를 컨트롤러로 전송하는 비동기 메서드.
-     * @param command 전송할 명령어.
-     * @param callback 응답이 도착했을 때 실행될 콜백 함수.
+     * @brief Sends a command with axis number and parameters asynchronously.
+     * @param base_command The command string (e.g., "APS").
+     * @param axis_no The axis number for the command.
+     * @param params The parameter string (e.g., "100/1000/0").
+     * @param callback The callback function to execute when a response is received.
      */
-    void sendCommand(const std::string& command, std::function<void(const ProtocolResponse&)> callback);
+    void sendCommand(const std::string& base_command, int axis_no, const std::string& params, std::function<void(const ProtocolResponse&)> callback);
+
+    /**
+     * @brief Sends a command with only axis number asynchronously.
+     * @param base_command The command string (e.g., "RDP").
+     * @param axis_no The axis number for the command.
+     * @param callback The callback function to execute when a response is received.
+     */
+    void sendCommand(const std::string& base_command, int axis_no, std::function<void(const ProtocolResponse&)> callback);
+
+    /**
+     * @brief Sends a command with no axis number or parameters asynchronously.
+     * @param base_command The command string (e.g., "CERR").
+     * @param callback The callback function to execute when a response is received.
+     */
+    void sendCommand(const std::string& base_command, std::function<void(const ProtocolResponse&)> callback);
 
 private:
     void handleRead(const std::string& response_data);
     ProtocolResponse parseResponse(const std::string& response);
-    std::string generateResponseKey(const ProtocolResponse& response);
+    // Helper function to generate a consistent key for the callback map.
+    std::string generateResponseKey(const std::string& base_command, int axis_no);
 
     std::shared_ptr<ICommunicationClient> client_;
-    // 콜백을 <명령어/축번호, 콜백 함수> 형식으로 매핑
+    // Maps callbacks to a unique key (command/axis_no or just command)
     std::map<std::string, std::function<void(const ProtocolResponse&)>> response_callbacks_;
     std::atomic<bool> is_reading_ = false;
 };

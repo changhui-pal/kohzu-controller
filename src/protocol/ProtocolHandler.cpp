@@ -6,19 +6,19 @@
 #include <atomic>
 
 /**
- * @brief ProtocolHandler 클래스의 생성자.
- * @param client 통신 클라이언트 객체.
+ * @brief Constructor for the ProtocolHandler class.
+ * @param client The communication client object.
  */
 ProtocolHandler::ProtocolHandler(std::shared_ptr<ICommunicationClient> client)
     : client_(client) {
     if (!client_) {
-        throw std::invalid_argument("ICommunicationClient 객체가 유효하지 않습니다.");
+        throw std::invalid_argument("ICommunicationClient object is not valid.");
     }
-    spdlog::info("ProtocolHandler 객체가 생성되었습니다.");
+    spdlog::info("ProtocolHandler object created.");
 }
 
 /**
- * @brief 프로토콜 핸들러를 초기화하고 비동기 읽기 작업을 시작합니다.
+ * @brief Initializes the protocol handler and starts the asynchronous read operation.
  */
 void ProtocolHandler::initialize() {
     if (!is_reading_) {
@@ -30,42 +30,82 @@ void ProtocolHandler::initialize() {
 }
 
 /**
- * @brief 명령어를 컨트롤러로 전송하는 비동기 메서드.
- * @param command 전송할 명령어.
- * @param callback 응답이 도착했을 때 실행될 콜백 함수.
+ * @brief Generates a key for the response_callbacks_ map.
+ * @param base_command The command string.
+ * @param axis_no The axis number.
+ * @return A unique string key.
  */
-void ProtocolHandler::sendCommand(const std::string& command, std::function<void(const ProtocolResponse&)> callback) {
-    std::string response_key = command; // 예시로 명령어만 사용
-    response_callbacks_[response_key] = callback;
-
-    client_->asyncWrite(command + "\r\n");
+std::string ProtocolHandler::generateResponseKey(const std::string& base_command, int axis_no) {
+    // A command like "CERR" with no axis_no has a key of "CERR".
+    // A command like "RDP" with axis 1 has a key of "RDP/1".
+    if (axis_no == -1) {
+        return base_command;
+    }
+    return base_command + "/" + std::to_string(axis_no);
 }
 
 /**
- * @brief 수신된 응답 데이터를 처리하는 메서드.
- * @param response_data 수신된 응답 문자열.
+ * @brief Sends a command with axis number and parameters asynchronously.
+ * @param base_command The command string without parameters.
+ * @param axis_no The axis number for the command.
+ * @param params The parameter string.
+ * @param callback The callback function to execute when a response is received.
+ */
+void ProtocolHandler::sendCommand(const std::string& base_command, int axis_no, const std::string& params, std::function<void(const ProtocolResponse&)> callback) {
+    std::string response_key = generateResponseKey(base_command, axis_no);
+    response_callbacks_[response_key] = callback;
+
+    std::string full_command = base_command + std::to_string(axis_no) + "/" + params + "\r\n";
+    client_->asyncWrite(full_command);
+}
+
+/**
+ * @brief Sends a command with only axis number asynchronously.
+ * @param base_command The command string without parameters.
+ * @param axis_no The axis number for the command.
+ * @param callback The callback function to execute when a response is received.
+ */
+void ProtocolHandler::sendCommand(const std::string& base_command, int axis_no, std::function<void(const ProtocolResponse&)> callback) {
+    std::string response_key = generateResponseKey(base_command, axis_no);
+    response_callbacks_[response_key] = callback;
+
+    std::string full_command = base_command + std::to_string(axis_no) + "\r\n";
+    client_->asyncWrite(full_command);
+}
+
+/**
+ * @brief Sends a command with no axis number or parameters asynchronously.
+ * @param base_command The command string without axis number or parameters.
+ * @param callback The callback function to execute when a response is received.
+ */
+void ProtocolHandler::sendCommand(const std::string& base_command, std::function<void(const ProtocolResponse&)> callback) {
+    std::string response_key = generateResponseKey(base_command, -1);
+    response_callbacks_[response_key] = callback;
+
+    std::string full_command = base_command + "\r\n";
+    client_->asyncWrite(full_command);
+}
+
+/**
+ * @brief Handles the received response data.
+ * @param response_data The received response string.
  */
 void ProtocolHandler::handleRead(const std::string& response_data) {
     try {
         ProtocolResponse response = parseResponse(response_data);
-        spdlog::info("응답 수신: {}", response.full_response);
+        spdlog::info("Received response: {}", response.full_response);
 
-        // 콜백 ID가 파라미터에 포함되어 있다고 가정
-        if (response.params.empty()) {
-            throw ProtocolException("응답에 콜백 ID가 포함되어 있지 않습니다.");
-        }
+        std::string response_key = generateResponseKey(response.command, response.axis_no);
         
-        unsigned int request_id = std::stoul(response.params.back()); // 마지막 파라미터가 ID
-        
-        auto it = response_callbacks_.find(request_id);
+        auto it = response_callbacks_.find(response_key);
         if (it != response_callbacks_.end()) {
             it->second(response);
             response_callbacks_.erase(it);
         } else {
-            spdlog::warn("일치하는 콜백 ID를 찾을 수 없습니다. 응답: {}", response_data);
+            spdlog::warn("No matching callback found. Response: {}", response_data);
         }
     } catch (const ProtocolException& e) {
-        spdlog::error("프로토콜 오류: {}", e.what());
+        spdlog::error("Protocol error: {}", e.what());
     }
     client_->asyncRead([this](const std::string& data) {
         this->handleRead(data);
@@ -73,16 +113,16 @@ void ProtocolHandler::handleRead(const std::string& response_data) {
 }
 
 /**
- * @brief 응답 문자열을 파싱하여 ProtocolResponse 구조체로 변환하는 메서드.
- * @param response 파싱할 응답 문자열.
- * @return 파싱된 ProtocolResponse 객체.
+ * @brief Parses the response string into a ProtocolResponse struct based on the provided manual.
+ * @param response The response string to parse.
+ * @return The parsed ProtocolResponse object.
  */
 ProtocolHandler::ProtocolResponse ProtocolHandler::parseResponse(const std::string& response) {
     ProtocolResponse parsed;
     parsed.full_response = response;
     std::string cleaned_response = response;
 
-    // 캐리지 리턴과 라인 피드 제거
+    // Remove carriage return and line feed from the end.
     if (!cleaned_response.empty() && cleaned_response.back() == '\n') {
         cleaned_response.pop_back();
     }
@@ -91,35 +131,46 @@ ProtocolHandler::ProtocolResponse ProtocolHandler::parseResponse(const std::stri
     }
     
     if (cleaned_response.empty()) {
-        throw ProtocolException("빈 응답 수신.");
+        throw ProtocolException("Received an empty response.");
     }
 
-    parsed.status = cleaned_response[0];
-    cleaned_response = cleaned_response.substr(1);
-
-    size_t slash_pos = cleaned_response.find('/');
-    if (slash_pos == std::string::npos) {
-        parsed.command = cleaned_response;
-        return parsed;
-    }
-
-    parsed.command = cleaned_response.substr(0, slash_pos);
-    cleaned_response = cleaned_response.substr(slash_pos + 1);
-
-    slash_pos = cleaned_response.find('/');
-    if (slash_pos != std::string::npos) {
-        try {
-            parsed.axis_no = std::stoi(cleaned_response.substr(0, slash_pos));
-            cleaned_response = cleaned_response.substr(slash_pos + 1);
-        } catch (const std::exception& e) {
-            throw ProtocolException("축 번호 파싱 실패: " + std::string(e.what()));
-        }
-    }
-
+    // Use a stringstream to split the response by the tab delimiter.
     std::stringstream ss(cleaned_response);
-    std::string param;
-    while (std::getline(ss, param, '/')) {
-        parsed.params.push_back(param);
+    std::vector<std::string> tokens;
+    std::string token;
+    while (std::getline(ss, token, '\t')) {
+        tokens.push_back(token);
+    }
+
+    if (tokens.empty()) {
+        throw ProtocolException("Invalid response format: No fields found.");
+    }
+
+    // 1. Parse Status (first field)
+    parsed.status = tokens[0][0];
+
+    // 2. Parse Command and Axis No. (second field)
+    if (tokens.size() > 1) {
+        std::string command_and_axis = tokens[1];
+        size_t first_digit_pos = command_and_axis.find_first_of("0123456789");
+        if (first_digit_pos != std::string::npos) {
+            parsed.command = command_and_axis.substr(0, first_digit_pos);
+            try {
+                parsed.axis_no = std::stoi(command_and_axis.substr(first_digit_pos));
+            } catch (const std::exception& e) {
+                throw ProtocolException("Failed to parse axis number from response: " + std::string(e.what()));
+            }
+        } else {
+            parsed.command = command_and_axis;
+            parsed.axis_no = -1; // No axis number in the response
+        }
+    } else {
+        throw ProtocolException("Invalid response format: Missing command field.");
+    }
+
+    // 3. Parse Parameters (remaining fields)
+    for (size_t i = 2; i < tokens.size(); ++i) {
+        parsed.params.push_back(tokens[i]);
     }
     
     return parsed;
