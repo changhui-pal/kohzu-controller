@@ -36,53 +36,41 @@ void ProtocolHandler::initialize() {
  * @return A unique string key.
  */
 std::string ProtocolHandler::generateResponseKey(const std::string& base_command, int axis_no) {
-    // A command like "CERR" with no axis_no has a key of "CERR".
-    // A command like "RDP" with axis 1 has a key of "RDP/1".
     if (axis_no == -1) {
         return base_command;
     }
-    return base_command + "/" + std::to_string(axis_no);
+    return base_command + std::to_string(axis_no);
 }
 
 /**
- * @brief Sends a command with axis number and parameters asynchronously.
- * @param base_command The command string without parameters.
- * @param axis_no The axis number for the command.
- * @param params The parameter string.
+ * @brief Sends a command with an optional axis number and parameters asynchronously.
+ * @param base_command The command string (e.g., "APS", "RDP", "CERR").
+ * @param axis_no The axis number for the command. Use a special value (e.g., -1) if no axis number is required.
+ * @param params A vector of string parameters.
  * @param callback The callback function to execute when a response is received.
  */
-void ProtocolHandler::sendCommand(const std::string& base_command, int axis_no, const std::string& params, std::function<void(const ProtocolResponse&)> callback) {
-    std::string response_key = generateResponseKey(base_command, axis_no);
-    response_callbacks_[response_key] = callback;
+void ProtocolHandler::sendCommand(const std::string& base_command, int axis_no, const std::vector<std::string>& params, std::function<void(const ProtocolResponse&)> callback) {
+    std::string full_command = base_command;
+    if (axis_no != -1) {
+        full_command += std::to_string(axis_no);
+    }
 
-    std::string full_command = base_command + std::to_string(axis_no) + "/" + params + "\r\n";
-    client_->asyncWrite(full_command);
-}
+    if (!params.empty()) {
+        if (axis_no != -1) {
+            full_command += "/";
+        }
+        for (size_t i = 0; i < params.size(); ++i) {
+            full_command += params[i];
+            if (i < params.size() - 1) {
+                full_command += "/";
+            }
+        }
+    }
+    full_command += "\r\n";
+    
+    // Push the callback into the queue for the specific command and axis
+    response_callbacks_[generateResponseKey(base_command, axis_no)].push(callback);
 
-/**
- * @brief Sends a command with only axis number asynchronously.
- * @param base_command The command string without parameters.
- * @param axis_no The axis number for the command.
- * @param callback The callback function to execute when a response is received.
- */
-void ProtocolHandler::sendCommand(const std::string& base_command, int axis_no, std::function<void(const ProtocolResponse&)> callback) {
-    std::string response_key = generateResponseKey(base_command, axis_no);
-    response_callbacks_[response_key] = callback;
-
-    std::string full_command = base_command + std::to_string(axis_no) + "\r\n";
-    client_->asyncWrite(full_command);
-}
-
-/**
- * @brief Sends a command with no axis number or parameters asynchronously.
- * @param base_command The command string without axis number or parameters.
- * @param callback The callback function to execute when a response is received.
- */
-void ProtocolHandler::sendCommand(const std::string& base_command, std::function<void(const ProtocolResponse&)> callback) {
-    std::string response_key = generateResponseKey(base_command, -1);
-    response_callbacks_[response_key] = callback;
-
-    std::string full_command = base_command + "\r\n";
     client_->asyncWrite(full_command);
 }
 
@@ -97,16 +85,26 @@ void ProtocolHandler::handleRead(const std::string& response_data) {
 
         std::string response_key = generateResponseKey(response.command, response.axis_no);
         
+        // Find the matching queue for the received response
         auto it = response_callbacks_.find(response_key);
         if (it != response_callbacks_.end()) {
-            it->second(response);
-            response_callbacks_.erase(it);
+            ThreadSafeQueue<std::function<void(const ProtocolResponse&)>>& queue = it->second;
+            if (!queue.empty()) {
+                std::function<void(const ProtocolResponse&)> callback = queue.pop();
+                callback(response);
+            }
+            if (queue.empty()) {
+                response_callbacks_.erase(it);
+            }
         } else {
-            spdlog::warn("No matching callback found. Response: {}", response_data);
+            // This is an unsolicited response or no matching callback was found
+            spdlog::warn("No matching callback queue found for response: {}", response_data);
         }
+
     } catch (const ProtocolException& e) {
         spdlog::error("Protocol error: {}", e.what());
     }
+
     client_->asyncRead([this](const std::string& data) {
         this->handleRead(data);
     });
@@ -117,7 +115,7 @@ void ProtocolHandler::handleRead(const std::string& response_data) {
  * @param response The response string to parse.
  * @return The parsed ProtocolResponse object.
  */
-ProtocolResponse ProtocolHandler::parseResponse(const std::string& response) {
+ProtocolHandler::ProtocolResponse ProtocolHandler::parseResponse(const std::string& response) {
     ProtocolResponse parsed;
     parsed.full_response = response;
     std::string cleaned_response = response;

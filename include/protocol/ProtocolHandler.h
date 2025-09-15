@@ -1,10 +1,10 @@
 #pragma once
 
 #include "core/ICommunicationClient.h"
-#include "common/ThreadSafeQueue.h"
 #include "protocol/exceptions/ConnectionException.h"
 #include "protocol/exceptions/ProtocolException.h"
 #include "protocol/exceptions/TimeoutException.h"
+#include "common/ThreadSafeQueue.h"
 #include <functional>
 #include <string>
 #include <vector>
@@ -12,6 +12,7 @@
 #include <memory>
 #include <future>
 #include <atomic>
+#include <mutex>
 
 /**
  * @struct ProtocolResponse
@@ -50,37 +51,20 @@ public:
     void initialize();
 
     /**
-     * @brief Sends a command with axis number and parameters asynchronously.
-     * @param base_command The command string (e.g., "APS").
-     * @param axis_no The axis number for the command.
-     * @param params The parameter string (e.g., "100/1000/0").
+     * @brief Sends a command with an optional axis number and parameters asynchronously.
+     * @param base_command The command string (e.g., "APS", "RDP", "CERR").
+     * @param axis_no The axis number for the command. Use a special value (e.g., -1) if no axis number is required.
+     * @param params A vector of string parameters.
      * @param callback The callback function to execute when a response is received.
      */
-    void sendCommand(const std::string& base_command, int axis_no, const std::string& params, std::function<void(const ProtocolResponse&)> callback);
-
-    /**
-     * @brief Sends a command with only axis number asynchronously.
-     * @param base_command The command string (e.g., "RDP").
-     * @param axis_no The axis number for the command.
-     * @param callback The callback function to execute when a response is received.
-     */
-    void sendCommand(const std::string& base_command, int axis_no, std::function<void(const ProtocolResponse&)> callback);
-
-    /**
-     * @brief Sends a command with no axis number or parameters asynchronously.
-     * @param base_command The command string (e.g., "CERR").
-     * @param callback The callback function to execute when a response is received.
-     */
-    void sendCommand(const std::string& base_command, std::function<void(const ProtocolResponse&)> callback);
+    void sendCommand(const std::string& base_command, int axis_no, const std::vector<std::string>& params, std::function<void(const ProtocolResponse&)> callback);
 
 private:
     void handleRead(const std::string& response_data);
-    ProtocolResponse parseResponse(const std::string& response);
-    // Helper function to generate a consistent key for the callback map.
     std::string generateResponseKey(const std::string& base_command, int axis_no);
+    ProtocolResponse parseResponse(const std::string& response);
 
     std::shared_ptr<ICommunicationClient> client_;
-    // Maps callbacks to a unique key (command/axis_no or just command)
-    std::map<std::string, std::function<void(const ProtocolResponse&)>> response_callbacks_;
+    std::map<std::string, ThreadSafeQueue<std::function<void(const ProtocolResponse&)>>> response_callbacks_;
     std::atomic<bool> is_reading_ = false;
 };

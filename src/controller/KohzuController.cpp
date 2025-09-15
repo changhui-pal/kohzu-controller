@@ -2,6 +2,11 @@
 #include "spdlog/spdlog.h"
 #include <stdexcept>
 #include <chrono>
+#include <vector>
+#include <string>
+
+// A constant to represent a command without an axis number
+static const int kNoAxis = -1;
 
 KohzuController::KohzuController(std::shared_ptr<ProtocolHandler> handler)
     : protocolHandler_(handler) {
@@ -18,11 +23,13 @@ void KohzuController::start() {
 }
 
 void KohzuController::moveAbsolute(int axis_no, int position, int speed, int response_type) {
-    // APS parameters order: position/speed/response_type
-    std::string params = std::to_string(position) + "/" + std::to_string(speed) + "/" + std::to_string(response_type);
-
+    std::vector<std::string> params = {
+        std::to_string(position),
+        std::to_string(speed),
+        std::to_string(response_type)
+    };
+    
     if (response_type == 0) {
-        // If response type is 0, register a callback for motion completion.
         protocolHandler_->sendCommand(
             "APS",
             axis_no,
@@ -32,7 +39,6 @@ void KohzuController::moveAbsolute(int axis_no, int position, int speed, int res
             }
         );
     } else {
-        // If response type is 1, register a callback for command submission.
         protocolHandler_->sendCommand(
             "APS",
             axis_no,
@@ -45,11 +51,13 @@ void KohzuController::moveAbsolute(int axis_no, int position, int speed, int res
 }
 
 void KohzuController::moveRelative(int axis_no, int distance, int speed, int response_type) {
-    // RPS parameters order: distance/speed/response_type
-    std::string params = std::to_string(distance) + "/" + std::to_string(speed) + "/" + std::to_string(response_type);
-
+    std::vector<std::string> params = {
+        std::to_string(distance),
+        std::to_string(speed),
+        std::to_string(response_type)
+    };
+    
     if (response_type == 0) {
-        // If response type is 0, register a callback for motion completion.
         protocolHandler_->sendCommand(
             "RPS",
             axis_no,
@@ -59,7 +67,6 @@ void KohzuController::moveRelative(int axis_no, int distance, int speed, int res
             }
         );
     } else {
-        // If response type is 1, register a callback for command submission.
         protocolHandler_->sendCommand(
             "RPS",
             axis_no,
@@ -75,6 +82,7 @@ void KohzuController::readCurrentPosition(int axis_no) {
     protocolHandler_->sendCommand(
         "RDP",
         axis_no,
+        {},
         [axis_no](const ProtocolResponse& response) {
             if (response.status == 'C' && !response.params.empty()) {
                 spdlog::info("Current position of axis {}: {}", axis_no, response.params[0]);
@@ -88,6 +96,8 @@ void KohzuController::readCurrentPosition(int axis_no) {
 void KohzuController::readLastError() {
     protocolHandler_->sendCommand(
         "CERR",
+        kNoAxis,
+        {},
         [this](const ProtocolResponse& response) {
             if (response.status == 'E' && !response.params.empty()) {
                 spdlog::error("Controller error code: {}", response.params[0]);

@@ -93,12 +93,12 @@ int main() {
 
     try {
         // Create and inject dependency objects
-        client = std::make_shared<TcpClient>(io_context, "127.0.0.1", "5000");
+        client = std::make_shared<TcpClient>(io_context, "192.168.1.120", "12321");
         protocolHandler = std::make_shared<ProtocolHandler>(client);
         controller = std::make_shared<KohzuController>(protocolHandler);
 
         // Start TCP connection
-        client->connect("127.0.0.1", "5000");
+        client->connect("192.168.1.120", "12321");
 
         // Start controller logic
         controller->start();
