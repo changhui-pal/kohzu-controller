@@ -123,11 +123,15 @@ void handleApsCommand(const std::shared_ptr<KohzuController>& controller, const 
         controller->startMonitoring({axis_no}, 100);
 
         controller->moveAbsolute(axis_no, position, speed, 0,
-            [controller, axis_no](const ProtocolResponse& response) {
+            [controller, axis_no, axisState](const ProtocolResponse& response) {
                 if (response.status == 'C') {
                     spdlog::info("Absolute move command for axis {} completed.", axis_no);
                 } else {
                     spdlog::error("Absolute move command for axis {} failed with status: {}", axis_no, response.status);
+                }
+                // Wait for the driving state to become 0 before stopping monitoring.
+                while (axisState->getStatusDetails(axis_no).driving_state != 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
                 controller->stopMonitoring();
                 std::cout << "Monitoring for axis " << axis_no << " stopped.\n";
@@ -152,11 +156,15 @@ void handleRpsCommand(const std::shared_ptr<KohzuController>& controller, const 
         controller->startMonitoring({axis_no}, 100);
 
         controller->moveRelative(axis_no, distance, speed, 0,
-            [controller, axis_no](const ProtocolResponse& response) {
+            [controller, axis_no, axisState](const ProtocolResponse& response) {
                 if (response.status == 'C') {
                     spdlog::info("Relative move command for axis {} completed.", axis_no);
                 } else {
                     spdlog::error("Relative move command for axis {} failed with status: {}", axis_no, response.status);
+                }
+                // Wait for the driving state to become 0 before stopping monitoring.
+                while (axisState->getStatusDetails(axis_no).driving_state != 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
                 controller->stopMonitoring();
                 std::cout << "Monitoring for axis " << axis_no << " stopped.\n";
