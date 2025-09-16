@@ -119,13 +119,18 @@ void handleApsCommand(const std::shared_ptr<KohzuController>& controller, const 
         int position = std::stoi(args[1]);
         int speed = args.size() > 2 ? std::stoi(args[2]) : 0;
         
+        std::cout << "Starting real-time monitoring for axis " << axis_no << "...\n";
+        controller->startMonitoring({axis_no}, 100);
+
         controller->moveAbsolute(axis_no, position, speed, 0,
-            [axis_no](const ProtocolResponse& response) {
+            [controller, axis_no](const ProtocolResponse& response) {
                 if (response.status == 'C') {
                     spdlog::info("Absolute move command for axis {} completed.", axis_no);
                 } else {
                     spdlog::error("Absolute move command for axis {} failed with status: {}", axis_no, response.status);
                 }
+                controller->stopMonitoring();
+                std::cout << "Monitoring for axis " << axis_no << " stopped.\n";
             });
             
     } catch (const std::exception& e) {
@@ -143,13 +148,18 @@ void handleRpsCommand(const std::shared_ptr<KohzuController>& controller, const 
         int distance = std::stoi(args[1]);
         int speed = args.size() > 2 ? std::stoi(args[2]) : 0;
         
+        std::cout << "Starting real-time monitoring for axis " << axis_no << "...\n";
+        controller->startMonitoring({axis_no}, 100);
+
         controller->moveRelative(axis_no, distance, speed, 0,
-            [axis_no](const ProtocolResponse& response) {
+            [controller, axis_no](const ProtocolResponse& response) {
                 if (response.status == 'C') {
                     spdlog::info("Relative move command for axis {} completed.", axis_no);
                 } else {
                     spdlog::error("Relative move command for axis {} failed with status: {}", axis_no, response.status);
                 }
+                controller->stopMonitoring();
+                std::cout << "Monitoring for axis " << axis_no << " stopped.\n";
             });
     } catch (const std::exception& e) {
         std::cout << "Invalid arguments. Please enter integers.\n";
