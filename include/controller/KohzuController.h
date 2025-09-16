@@ -7,6 +7,7 @@
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <functional>
 
 /**
  * @class KohzuController
@@ -47,8 +48,10 @@ public:
      * @param position The target absolute position.
      * @param speed The movement speed. Defaults to 0 if not provided.
      * @param response_type The response type. Defaults to 0 if not provided.
+     * @param callback A function to be called when the command completes.
      */
-    void moveAbsolute(int axis_no, int position, int speed = 0, int response_type = 0);
+    void moveAbsolute(int axis_no, int position, int speed = 0, int response_type = 0,
+                      std::function<void(const ProtocolResponse&)> callback = nullptr);
 
     /**
      * @brief Commands the specified axis to move by a relative distance.
@@ -56,11 +59,15 @@ public:
      * @param distance The relative distance to move.
      * @param speed The movement speed. Defaults to 0 if not provided.
      * @param response_type The response type. Defaults to 0 if not provided.
+     * @param callback A function to be called when the command completes.
      */
-    void moveRelative(int axis_no, int distance, int speed = 0, int response_type = 0);
+    void moveRelative(int axis_no, int distance, int speed = 0, int response_type = 0,
+                      std::function<void(const ProtocolResponse&)> callback = nullptr);
 
 private:
     void monitorThreadFunction(int period_ms);
+    void readPosition(int axis_no);
+    void readStatus(int axis_no);
     
     std::shared_ptr<ProtocolHandler> protocolHandler_;
     std::shared_ptr<AxisState> axisState_;

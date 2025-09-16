@@ -1,15 +1,15 @@
 #pragma once
 
+#include <mutex>
+#include <map>
 #include <string>
 #include <vector>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <chrono>
 
 /**
  * @struct AxisStatus
- * @brief Represents the detailed status flags from the STR command.
+ * @brief Represents the detailed status of a single axis.
+ *
+ * This structure holds various status flags and values returned by the STR command.
  */
 struct AxisStatus {
     int driving_state = 0;
@@ -21,35 +21,45 @@ struct AxisStatus {
 };
 
 /**
- * @struct AxisData
- * @brief Represents the state data for a single axis.
- */
-struct AxisData {
-    int position = 0;
-    AxisStatus status;
-    std::chrono::steady_clock::time_point last_updated_time;
-};
-
-/**
  * @class AxisState
- * @brief Manages the state of all axes, providing a thread-safe way to access
- * position and status information.
+ * @brief Manages the state (position, status) of all axes in a thread-safe manner.
+ *
+ * This class provides a centralized, shared data store for axis information.
+ * A mutex is used to ensure that data can be accessed and modified safely
+ * from multiple threads (e.g., the monitoring thread and the main command thread).
  */
 class AxisState {
 public:
-    // Update the position of a specific axis
+    /**
+     * @brief Updates the current position of a specific axis.
+     * @param axis_no The axis number.
+     * @param position The new position value.
+     */
     void updatePosition(int axis_no, int position);
 
-    // Update the status of a specific axis from STR command parameters
+    /**
+     * @brief Updates the detailed status of a specific axis from a protocol response.
+     * @param axis_no The axis number.
+     * @param params A vector of strings containing status parameters from the STR command.
+     */
     void updateStatus(int axis_no, const std::vector<std::string>& params);
 
-    // Get the position of a specific axis
+    /**
+     * @brief Retrieves the last known position of a specific axis.
+     * @param axis_no The axis number.
+     * @return The cached position value.
+     */
     int getPosition(int axis_no);
 
-    // Get the status of a specific axis
+    /**
+     * @brief Retrieves the last known status details of a specific axis.
+     * @param axis_no The axis number.
+     * @return The cached AxisStatus structure.
+     */
     AxisStatus getStatusDetails(int axis_no);
 
 private:
-    std::map<int, AxisData> axes_data_;
+    std::map<int, int> positions_;
+    std::map<int, AxisStatus> statuses_;
     std::mutex mtx_;
 };

@@ -79,31 +79,44 @@ void KohzuController::stopMonitoring() {
 void KohzuController::monitorThreadFunction(int period_ms) {
     while (monitoring_running_.load()) {
         for (int axis_no : axes_to_monitor_) {
-            // Send RDP command to read position for the current axis
-            protocolHandler_->sendCommand("RDP", axis_no, {},
-                [this, axis_no](const ProtocolResponse& response) {
-                    if (response.status == 'C' && !response.params.empty()) {
-                        try {
-                            int position = std::stoi(response.params[0]);
-                            this->axisState_->updatePosition(axis_no, position);
-                            spdlog::debug("Monitoring: Position of axis {} updated to {}.", axis_no, position);
-                        } catch (const std::exception& e) {
-                            spdlog::error("Monitoring: Failed to parse RDP position for axis {}: {}", axis_no, e.what());
-                        }
-                    }
-                });
-            
-            // Send STR command to read status for the current axis
-            protocolHandler_->sendCommand("STR", axis_no, {},
-                [this, axis_no](const ProtocolResponse& response) {
-                    if (response.status == 'C' && response.params.size() >= 6) {
-                        this->axisState_->updateStatus(axis_no, response.params);
-                        spdlog::debug("Monitoring: Status of axis {} updated.", axis_no);
-                    }
-                });
+            readPosition(axis_no);
+            readStatus(axis_no);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(period_ms));
     }
+}
+
+/**
+ * @brief Reads the current position of a specific axis.
+ * @param axis_no The axis number.
+ */
+void KohzuController::readPosition(int axis_no) {
+    protocolHandler_->sendCommand("RDP", axis_no, {},
+        [this, axis_no](const ProtocolResponse& response) {
+            if (response.status == 'C' && !response.params.empty()) {
+                try {
+                    int position = std::stoi(response.params[0]);
+                    this->axisState_->updatePosition(axis_no, position);
+                    spdlog::debug("Monitoring: Position of axis {} updated to {}.", axis_no, position);
+                } catch (const std::exception& e) {
+                    spdlog::error("Monitoring: Failed to parse RDP position for axis {}: {}", axis_no, e.what());
+                }
+            }
+        });
+}
+
+/**
+ * @brief Reads the detailed status of a specific axis.
+ * @param axis_no The axis number.
+ */
+void KohzuController::readStatus(int axis_no) {
+    protocolHandler_->sendCommand("STR", axis_no, {},
+        [this, axis_no](const ProtocolResponse& response) {
+            if (response.status == 'C' && response.params.size() >= 6) {
+                this->axisState_->updateStatus(axis_no, response.params);
+                spdlog::debug("Monitoring: Status of axis {} updated.", axis_no);
+            }
+        });
 }
 
 /**
@@ -112,8 +125,10 @@ void KohzuController::monitorThreadFunction(int period_ms) {
  * @param position The target absolute position.
  * @param speed The movement speed. Defaults to 0 if not provided.
  * @param response_type The response type. Defaults to 0 if not provided.
+ * @param callback A function to be called when the command completes.
  */
-void KohzuController::moveAbsolute(int axis_no, int position, int speed, int response_type) {
+void KohzuController::moveAbsolute(int axis_no, int position, int speed, int response_type,
+                                   std::function<void(const ProtocolResponse&)> callback) {
     // According to the manual, the parameter order is: speed, position, response_type.
     std::vector<std::string> params = {
         std::to_string(speed),
@@ -121,14 +136,8 @@ void KohzuController::moveAbsolute(int axis_no, int position, int speed, int res
         std::to_string(response_type)
     };
 
-    protocolHandler_->sendCommand("APS", axis_no, params,
-        [this, axis_no](const ProtocolResponse& response) {
-            if (response.status == 'C') {
-                spdlog::info("Absolute move command for axis {} completed.", axis_no);
-            } else {
-                spdlog::error("Absolute move command for axis {} failed with status: {}", axis_no, response.status);
-            }
-        });
+    // Use the provided callback directly
+    protocolHandler_->sendCommand("APS", axis_no, params, callback);
 }
 
 /**
@@ -137,8 +146,10 @@ void KohzuController::moveAbsolute(int axis_no, int position, int speed, int res
  * @param distance The relative distance to move.
  * @param speed The movement speed. Defaults to 0 if not provided.
  * @param response_type The response type. Defaults to 0 if not provided.
+ * @param callback A function to be called when the command completes.
  */
-void KohzuController::moveRelative(int axis_no, int distance, int speed, int response_type) {
+void KohzuController::moveRelative(int axis_no, int distance, int speed, int response_type,
+                                   std::function<void(const ProtocolResponse&)> callback) {
     // According to the manual, the parameter order is: speed, distance, response_type.
     std::vector<std::string> params = {
         std::to_string(speed),
@@ -146,12 +157,6 @@ void KohzuController::moveRelative(int axis_no, int distance, int speed, int res
         std::to_string(response_type)
     };
 
-    protocolHandler_->sendCommand("RPS", axis_no, params,
-        [this, axis_no](const ProtocolResponse& response) {
-            if (response.status == 'C') {
-                spdlog::info("Relative move command for axis {} completed.", axis_no);
-            } else {
-                spdlog::error("Relative move command for axis {} failed with status: {}", axis_no, response.status);
-            }
-        });
+    // Use the provided callback directly
+    protocolHandler_->sendCommand("RPS", axis_no, params, callback);
 }

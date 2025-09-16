@@ -1,5 +1,7 @@
 #include "controller/KohzuController.h"
-#include "controller/AxisState.h" // Include the new AxisState header
+#include "controller/AxisState.h"
+#include "core/TcpClient.h" // 추가: TcpClient 클래스 정의 포함
+#include "protocol/ProtocolHandler.h" // 추가: ProtocolHandler 클래스 정의 포함
 #include "spdlog/spdlog.h"
 #include <iostream>
 #include <string>
@@ -9,6 +11,8 @@
 #include <chrono>
 #include <future>
 #include <stdexcept>
+#include <sstream>
+#include <algorithm>
 
 // Function prototypes
 void handleUserInput(const std::shared_ptr<KohzuController>& controller, const std::shared_ptr<AxisState>& axisState, const std::string& input);
