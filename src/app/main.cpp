@@ -1,18 +1,17 @@
 #include "controller/KohzuController.h"
 #include "controller/AxisState.h"
-#include "core/TcpClient.h" // 추가: TcpClient 클래스 정의 포함
-#include "protocol/ProtocolHandler.h" // 추가: ProtocolHandler 클래스 정의 포함
+#include "core/TcpClient.h"
+#include "protocol/ProtocolHandler.h"
 #include "spdlog/spdlog.h"
 #include <iostream>
 #include <string>
 #include <vector>
 #include <memory>
 #include <thread>
-#include <chrono>
-#include <future>
 #include <stdexcept>
 #include <sstream>
 #include <algorithm>
+#include <functional>
 
 // Function prototypes
 void handleUserInput(const std::shared_ptr<KohzuController>& controller, const std::shared_ptr<AxisState>& axisState, const std::string& input);
@@ -22,9 +21,6 @@ void handleApsCommand(const std::shared_ptr<KohzuController>& controller, const 
 void handleRpsCommand(const std::shared_ptr<KohzuController>& controller, const std::shared_ptr<AxisState>& axisState, const std::vector<std::string>& args);
 void handleRdpCommand(const std::shared_ptr<AxisState>& axisState, const std::vector<std::string>& args);
 void handleStartMonitoringCommand(const std::shared_ptr<KohzuController>& controller, const std::vector<std::string>& args);
-
-// Function to print axis state during a command operation
-void monitorAndPrint(const std::shared_ptr<AxisState>& axisState, int axis_no, std::future<void> future);
 
 int main() {
     // Set up logging
@@ -123,24 +119,15 @@ void handleApsCommand(const std::shared_ptr<KohzuController>& controller, const 
         int position = std::stoi(args[1]);
         int speed = args.size() > 2 ? std::stoi(args[2]) : 0;
         
-        // Use a promise/future to know when the command completes
-        std::promise<void> promise;
-        std::future<void> future = promise.get_future();
-
-        // Pass a callback to the controller that fulfills the promise
         controller->moveAbsolute(axis_no, position, speed, 0,
-            [&promise](const ProtocolResponse& response) {
+            [axis_no](const ProtocolResponse& response) {
                 if (response.status == 'C') {
-                    spdlog::info("Absolute move command for axis {} completed.", response.axis_no);
+                    spdlog::info("Absolute move command for axis {} completed.", axis_no);
                 } else {
-                    spdlog::error("Absolute move command for axis {} failed with status: {}", response.axis_no, response.status);
+                    spdlog::error("Absolute move command for axis {} failed with status: {}", axis_no, response.status);
                 }
-                promise.set_value(); // Fulfill the promise to signal completion
             });
             
-        // Start monitoring and printing position
-        monitorAndPrint(axisState, axis_no, std::move(future));
-
     } catch (const std::exception& e) {
         std::cout << "Invalid arguments. Please enter integers.\n";
     }
@@ -156,23 +143,14 @@ void handleRpsCommand(const std::shared_ptr<KohzuController>& controller, const 
         int distance = std::stoi(args[1]);
         int speed = args.size() > 2 ? std::stoi(args[2]) : 0;
         
-        // Use a promise/future to know when the command completes
-        std::promise<void> promise;
-        std::future<void> future = promise.get_future();
-
-        // Pass a callback to the controller that fulfills the promise
         controller->moveRelative(axis_no, distance, speed, 0,
-            [&promise](const ProtocolResponse& response) {
+            [axis_no](const ProtocolResponse& response) {
                 if (response.status == 'C') {
-                    spdlog::info("Relative move command for axis {} completed.", response.axis_no);
+                    spdlog::info("Relative move command for axis {} completed.", axis_no);
                 } else {
-                    spdlog::error("Relative move command for axis {} failed with status: {}", response.axis_no, response.status);
+                    spdlog::error("Relative move command for axis {} failed with status: {}", axis_no, response.status);
                 }
-                promise.set_value(); // Fulfill the promise to signal completion
             });
-
-        // Start monitoring and printing position
-        monitorAndPrint(axisState, axis_no, std::move(future));
     } catch (const std::exception& e) {
         std::cout << "Invalid arguments. Please enter integers.\n";
     }
@@ -217,20 +195,4 @@ void handleStartMonitoringCommand(const std::shared_ptr<KohzuController>& contro
     }
 
     controller->startMonitoring(axes, 100); // Start monitoring with a 100ms period
-}
-
-// Monitors axis position at a 100ms interval until the command completes
-void monitorAndPrint(const std::shared_ptr<AxisState>& axisState, int axis_no, std::future<void> future) {
-    std::cout << "Monitoring axis " << axis_no << " position..." << std::endl;
-    auto start_time = std::chrono::steady_clock::now();
-    
-    while (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
-        int current_position = axisState->getPosition(axis_no);
-        std::cout << "  -> Position: " << current_position << "\n";
-        // To avoid flooding the console, wait a bit before the next check.
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    
-    std::cout << "Monitoring complete." << std::endl;
-    std::cout << "Final position: " << axisState->getPosition(axis_no) << std::endl;
 }

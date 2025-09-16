@@ -23,6 +23,7 @@ include_directories(include)
 set(SOURCE_FILES
     src/app/main.cpp
     src/controller/KohzuController.cpp
+    src/controller/AxisState.cpp
     src/core/TcpClient.cpp
     src/protocol/ProtocolHandler.cpp
     src/protocol/exceptions/ConnectionException.cpp

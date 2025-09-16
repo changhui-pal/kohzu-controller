@@ -85,9 +85,6 @@ void ProtocolHandler::sendCommand(const std::string& base_command, int axis_no, 
  * @param response_data The received response string.
  */
 void ProtocolHandler::handleRead(const std::string& response_data) {
-    // Log the raw received data
-    spdlog::info("Received raw data: {}", response_data);
-    
     try {
         ProtocolResponse response = parseResponse(response_data);
         spdlog::info("Received response: {}", response.full_response);
