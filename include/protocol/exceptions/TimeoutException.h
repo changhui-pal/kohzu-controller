@@ -6,6 +6,7 @@
 
 /**
  * @brief Exception class for timeout events.
+ *
  * This is used when a response is not received within the specified time.
  */
 class TimeoutException : public std::runtime_error {

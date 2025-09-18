@@ -1,4 +1,5 @@
-#pragma once
+#ifndef PROTOCOL_HANDLER_H
+#define PROTOCOL_HANDLER_H
 
 #include "core/ICommunicationClient.h"
 #include "protocol/exceptions/ConnectionException.h"
@@ -23,10 +24,10 @@
  */
 struct ProtocolResponse {
     char status;
-    int axis_no;
+    int axisNo;
     std::string command;
     std::vector<std::string> params;
-    std::string full_response;
+    std::string fullResponse;
 };
 
 /**
@@ -52,20 +53,22 @@ public:
 
     /**
      * @brief Sends a command with an optional axis number and parameters asynchronously.
-     * @param base_command The command string (e.g., "APS", "RDP", "CERR").
-     * @param axis_no The axis number for the command. Use a special value (e.g., -1) if no axis number is required.
+     * @param baseCommand The command string (e.g., "APS", "RDP", "CERR").
+     * @param axisNo The axis number for the command. Use a special value (e.g., -1) if no axis number is required.
      * @param params A vector of string parameters.
      * @param callback The callback function to execute when a response is received.
      */
-    void sendCommand(const std::string& base_command, int axis_no, const std::vector<std::string>& params, std::function<void(const ProtocolResponse&)> callback);
+    void sendCommand(const std::string& baseCommand, int axisNo, const std::vector<std::string>& params, std::function<void(const ProtocolResponse&)> callback);
 
 private:
-    void handleRead(const std::string& response_data);
-    std::string generateResponseKey(const std::string& base_command, int axis_no);
+    void handleRead(const std::string& responseData);
+    std::string generateResponseKey(const std::string& baseCommand, int axisNo);
     ProtocolResponse parseResponse(const std::string& response);
 
     std::shared_ptr<ICommunicationClient> client_;
-    std::map<std::string, ThreadSafeQueue<std::function<void(const ProtocolResponse&)>>> response_callbacks_;
-    std::atomic<bool> is_reading_ = false;
-    std::mutex callback_mutex_; // Protects the response_callbacks_ map
+    std::map<std::string, ThreadSafeQueue<std::function<void(const ProtocolResponse&)>>> responseCallbacks_;
+    std::atomic<bool> isReading_ = false;
+    std::mutex callbackMutex_; // Protects the responseCallbacks_ map
 };
+
+#endif // PROTOCOL_HANDLER_H

@@ -6,14 +6,14 @@
 
 /**
  * @brief Constructor for TcpClient.
- * @param io_context The Boost.Asio I/O context.
+ * @param ioContext The Boost.Asio I/O context.
  * @param host The hostname or IP address to connect to.
  * @param port The port number to connect to.
  */
-TcpClient::TcpClient(boost::asio::io_context& io_context, const std::string& host, const std::string& port)
-    : socket_(io_context),
-      resolver_(io_context) {
-    spdlog::info("TcpClient 객체 생성: {}:{}", host, port);
+TcpClient::TcpClient(boost::asio::io_context& ioContext, const std::string& host, const std::string& port)
+    : socket_(ioContext),
+      resolver_(ioContext) {
+    spdlog::info("TcpClient object created: {}:{}", host, port);
 }
 
 /**
@@ -24,9 +24,9 @@ TcpClient::TcpClient(boost::asio::io_context& io_context, const std::string& hos
 void TcpClient::connect(const std::string& host, const std::string& port) {
     try {
         boost::asio::connect(socket_, resolver_.resolve(host, port));
-        spdlog::info("서버에 성공적으로 연결되었습니다: {}:{}", host, port);
+        spdlog::info("Successfully connected to the server: {}:{}", host, port);
     } catch (const boost::system::system_error& e) {
-        throw ConnectionException("연결 실패: " + std::string(e.what()));
+        throw ConnectionException("Connection failed: " + std::string(e.what()));
     }
 }
 
@@ -36,27 +36,27 @@ void TcpClient::connect(const std::string& host, const std::string& port) {
  */
 void TcpClient::asyncRead(std::function<void(const std::string&)> callback) {
     // Start a new async read operation
-    boost::asio::async_read_until(socket_, response_buffer_, '\n',
-        [this, callback](const boost::system::error_code& error, std::size_t bytes_transferred) {
+    boost::asio::async_read_until(socket_, responseBuffer_, '\n',
+        [this, callback](const boost::system::error_code& error, std::size_t bytesTransferred) {
             if (!error) {
-                std::string received_data;
+                std::string receivedData;
                 // Move data from the buffer to the string until the delimiter is found
-                std::istream is(&response_buffer_);
-                std::getline(is, received_data);
+                std::istream is(&responseBuffer_);
+                std::getline(is, receivedData);
                 
                 // Add the delimiter back to the string
-                received_data += '\n';
+                receivedData += '\n';
 
                 // Call the user-provided callback
-                callback(received_data);
+                callback(receivedData);
 
                 // Continue reading
                 this->asyncRead(callback);
             } else if (error == boost::asio::error::eof || error == boost::asio::error::connection_reset) {
                 // Handle disconnection
-                spdlog::warn("서버 연결이 종료되었습니다.");
+                spdlog::warn("Server connection closed.");
             } else {
-                spdlog::error("비동기 읽기 오류: {}", error.message());
+                spdlog::error("Asynchronous read error: {}", error.message());
             }
         });
 }
@@ -67,11 +67,11 @@ void TcpClient::asyncRead(std::function<void(const std::string&)> callback) {
  */
 void TcpClient::asyncWrite(const std::string& data) {
     boost::asio::async_write(socket_, boost::asio::buffer(data),
-        [this, data](const boost::system::error_code& error, std::size_t bytes_transferred) {
+        [this, data](const boost::system::error_code& error, std::size_t bytesTransferred) {
             if (!error) {
-                spdlog::debug("데이터 {} 바이트 전송 완료.", bytes_transferred);
+                spdlog::debug("Successfully transmitted {} bytes of data.", bytesTransferred);
             } else {
-                spdlog::error("비동기 쓰기 오류: {}", error.message());
+                spdlog::error("Asynchronous write error: {}", error.message());
             }
         });
 }

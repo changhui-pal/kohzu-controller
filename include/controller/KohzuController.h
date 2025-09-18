@@ -1,7 +1,8 @@
-#pragma once
+#ifndef KOHZU_CONTROLLER_H
+#define KOHZU_CONTROLLER_H
 
 #include "protocol/ProtocolHandler.h"
-#include "controller/AxisState.h" // Include the new AxisState header
+#include "controller/AxisState.h"
 #include <memory>
 #include <string>
 #include <thread>
@@ -32,10 +33,10 @@ public:
 
     /**
      * @brief Starts periodic status monitoring for specified axes.
-     * @param axes_to_monitor A vector of axis numbers to monitor.
-     * @param period_ms The monitoring period in milliseconds.
+     * @param axesToMonitor A vector of axis numbers to monitor.
+     * @param periodMs The monitoring period in milliseconds.
      */
-    void startMonitoring(const std::vector<int>& axes_to_monitor, int period_ms);
+    void startMonitoring(const std::vector<int>& axesToMonitor, int periodMs);
 
     /**
      * @brief Stops periodic status monitoring.
@@ -44,35 +45,37 @@ public:
 
     /**
      * @brief Commands the specified axis to move to an absolute position.
-     * @param axis_no The axis number to move.
+     * @param axisNo The axis number to move.
      * @param position The target absolute position.
      * @param speed The movement speed. Defaults to 0 if not provided.
-     * @param response_type The response type. Defaults to 0 if not provided.
+     * @param responseType The response type. Defaults to 0 if not provided.
      * @param callback A function to be called when the command completes.
      */
-    void moveAbsolute(int axis_no, int position, int speed = 0, int response_type = 0,
+    void moveAbsolute(int axisNo, int position, int speed = 0, int responseType = 0,
                       std::function<void(const ProtocolResponse&)> callback = nullptr);
 
     /**
      * @brief Commands the specified axis to move by a relative distance.
-     * @param axis_no The axis number to move.
+     * @param axisNo The axis number to move.
      * @param distance The relative distance to move.
      * @param speed The movement speed. Defaults to 0 if not provided.
-     * @param response_type The response type. Defaults to 0 if not provided.
+     * @param responseType The response type. Defaults to 0 if not provided.
      * @param callback A function to be called when the command completes.
      */
-    void moveRelative(int axis_no, int distance, int speed = 0, int response_type = 0,
+    void moveRelative(int axisNo, int distance, int speed = 0, int responseType = 0,
                       std::function<void(const ProtocolResponse&)> callback = nullptr);
 
 private:
-    void monitorThreadFunction(int period_ms);
-    void readPosition(int axis_no);
-    void readStatus(int axis_no);
+    void monitorThreadFunction(int periodMs);
+    void readPosition(int axisNo);
+    void readStatus(int axisNo);
     
     std::shared_ptr<ProtocolHandler> protocolHandler_;
     std::shared_ptr<AxisState> axisState_;
 
-    std::atomic<bool> monitoring_running_{false};
-    std::unique_ptr<std::thread> monitoring_thread_;
-    std::vector<int> axes_to_monitor_;
+    std::atomic<bool> isMonitoringRunning_{false};
+    std::unique_ptr<std::thread> monitoringThread_;
+    std::vector<int> axesToMonitor_;
 };
+
+#endif // KOHZU_CONTROLLER_H

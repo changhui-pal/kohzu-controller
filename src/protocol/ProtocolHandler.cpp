@@ -21,8 +21,8 @@ ProtocolHandler::ProtocolHandler(std::shared_ptr<ICommunicationClient> client)
  * @brief Initializes the protocol handler and starts the asynchronous read operation.
  */
 void ProtocolHandler::initialize() {
-    if (!is_reading_) {
-        is_reading_ = true;
+    if (!isReading_) {
+        isReading_ = true;
         client_->asyncRead([this](const std::string& data) {
             this->handleRead(data);
         });
@@ -30,84 +30,80 @@ void ProtocolHandler::initialize() {
 }
 
 /**
- * @brief Generates a key for the response_callbacks_ map.
- * @param base_command The command string.
- * @param axis_no The axis number.
+ * @brief Generates a key for the responseCallbacks_ map.
+ * @param baseCommand The command string.
+ * @param axisNo The axis number.
  * @return A unique string key.
  */
-std::string ProtocolHandler::generateResponseKey(const std::string& base_command, int axis_no) {
-    if (axis_no == -1) {
-        return base_command;
+std::string ProtocolHandler::generateResponseKey(const std::string& baseCommand, int axisNo) {
+    if (axisNo == -1) {
+        return baseCommand;
     }
-    return base_command + std::to_string(axis_no);
+    return baseCommand + std::to_string(axisNo);
 }
 
 /**
  * @brief Sends a command with an optional axis number and parameters asynchronously.
- * @param base_command The command string (e.g., "APS", "RDP", "CERR").
- * @param axis_no The axis number for the command. Use a special value (e.g., -1) if no axis number is required.
+ * @param baseCommand The command string (e.g., "APS", "RDP", "CERR").
+ * @param axisNo The axis number for the command. Use a special value (e.g., -1) if no axis number is required.
  * @param params A vector of string parameters.
  * @param callback The callback function to execute when a response is received.
  */
-void ProtocolHandler::sendCommand(const std::string& base_command, int axis_no, const std::vector<std::string>& params, std::function<void(const ProtocolResponse&)> callback) {
-    std::string full_command = base_command;
-    if (axis_no != -1) {
-        full_command += std::to_string(axis_no);
+void ProtocolHandler::sendCommand(const std::string& baseCommand, int axisNo, const std::vector<std::string>& params, std::function<void(const ProtocolResponse&)> callback) {
+    std::string fullCommand = baseCommand;
+    if (axisNo != -1) {
+        fullCommand += std::to_string(axisNo);
     }
 
     if (!params.empty()) {
-        if (axis_no != -1) {
-            full_command += "/";
+        if (axisNo != -1) {
+            fullCommand += "/";
         }
         for (size_t i = 0; i < params.size(); ++i) {
-            full_command += params[i];
+            fullCommand += params[i];
             if (i < params.size() - 1) {
-                full_command += "/";
+                fullCommand += "/";
             }
         }
     }
-    full_command += "\r\n";
-    
+    fullCommand += "\r\n";
     // Protect the map access with a lock
-    std::lock_guard<std::mutex> lock(callback_mutex_);
-    
+    std::lock_guard<std::mutex> lock(callbackMutex_);
     // Push the callback into the queue for the specific command and axis
-    response_callbacks_[generateResponseKey(base_command, axis_no)].push(callback);
-    
+    responseCallbacks_[generateResponseKey(baseCommand, axisNo)].push(callback);
     // Log the full command being sent
-    spdlog::info("Sending command: {}", full_command);
+    spdlog::info("Sending command: {}", fullCommand);
 
-    client_->asyncWrite(full_command);
+    client_->asyncWrite(fullCommand);
 }
 
 /**
  * @brief Handles the received response data.
- * @param response_data The received response string.
+ * @param responseData The received response string.
  */
-void ProtocolHandler::handleRead(const std::string& response_data) {
+void ProtocolHandler::handleRead(const std::string& responseData) {
     try {
-        ProtocolResponse response = parseResponse(response_data);
-        spdlog::info("Received response: {}", response.full_response);
+        ProtocolResponse response = parseResponse(responseData);
+        spdlog::info("Received response: {}", response.fullResponse);
 
-        std::string response_key = generateResponseKey(response.command, response.axis_no);
+        std::string responseKey = generateResponseKey(response.command, response.axisNo);
         
         // Protect the map access with a lock
-        std::lock_guard<std::mutex> lock(callback_mutex_);
-        
+        std::lock_guard<std::mutex> lock(callbackMutex_);
         // Find the matching queue for the received response
-        auto it = response_callbacks_.find(response_key);
-        if (it != response_callbacks_.end()) {
+        auto it = responseCallbacks_.find(responseKey);
+        if (it != responseCallbacks_.end()) {
             ThreadSafeQueue<std::function<void(const ProtocolResponse&)>>& queue = it->second;
             if (!queue.empty()) {
                 std::function<void(const ProtocolResponse&)> callback = queue.pop();
                 callback(response);
             }
             if (queue.empty()) {
-                response_callbacks_.erase(it);
+                responseCallbacks_.erase(it);
             }
         } else {
             // This is an unsolicited response or no matching callback was found
-            spdlog::warn("No matching callback queue found for response: {}", response_data);
+            spdlog::warn("No matching callback queue found for response: {}", responseData);
         }
 
     } catch (const ProtocolException& e) {
@@ -126,23 +122,22 @@ void ProtocolHandler::handleRead(const std::string& response_data) {
  */
 ProtocolResponse ProtocolHandler::parseResponse(const std::string& response) {
     ProtocolResponse parsed;
-    parsed.full_response = response;
-    std::string cleaned_response = response;
-
+    parsed.fullResponse = response;
+    std::string cleanedResponse = response;
     // Remove carriage return and line feed from the end.
-    if (!cleaned_response.empty() && cleaned_response.back() == '\n') {
-        cleaned_response.pop_back();
+    if (!cleanedResponse.empty() && cleanedResponse.back() == '\n') {
+        cleanedResponse.pop_back();
     }
-    if (!cleaned_response.empty() && cleaned_response.back() == '\r') {
-        cleaned_response.pop_back();
+    if (!cleanedResponse.empty() && cleanedResponse.back() == '\r') {
+        cleanedResponse.pop_back();
     }
     
-    if (cleaned_response.empty()) {
+    if (cleanedResponse.empty()) {
         throw ProtocolException("Received an empty response.");
     }
 
     // Use a stringstream to split the response by the tab delimiter.
-    std::stringstream ss(cleaned_response);
+    std::stringstream ss(cleanedResponse);
     std::vector<std::string> tokens;
     std::string token;
     while (std::getline(ss, token, '\t')) {
@@ -155,21 +150,20 @@ ProtocolResponse ProtocolHandler::parseResponse(const std::string& response) {
 
     // 1. Parse Status (first field)
     parsed.status = tokens[0][0];
-
     // 2. Parse Command and Axis No. (second field)
     if (tokens.size() > 1) {
-        std::string command_and_axis = tokens[1];
-        size_t first_digit_pos = command_and_axis.find_first_of("0123456789");
-        if (first_digit_pos != std::string::npos) {
-            parsed.command = command_and_axis.substr(0, first_digit_pos);
+        std::string commandAndAxis = tokens[1];
+        size_t firstDigitPos = commandAndAxis.find_first_of("0123456789");
+        if (firstDigitPos != std::string::npos) {
+            parsed.command = commandAndAxis.substr(0, firstDigitPos);
             try {
-                parsed.axis_no = std::stoi(command_and_axis.substr(first_digit_pos));
+                parsed.axisNo = std::stoi(commandAndAxis.substr(firstDigitPos));
             } catch (const std::exception& e) {
                 throw ProtocolException("Failed to parse axis number from response: " + std::string(e.what()));
             }
         } else {
-            parsed.command = command_and_axis;
-            parsed.axis_no = -1; // No axis number in the response
+            parsed.command = commandAndAxis;
+            parsed.axisNo = -1; // No axis number in the response
         }
     } else {
         throw ProtocolException("Invalid response format: Missing command field.");

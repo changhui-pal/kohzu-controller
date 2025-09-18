@@ -6,6 +6,7 @@
 
 /**
  * @brief Exception class for protocol layer errors.
+ *
  * This indicates errors like invalid command parameters or response parsing failures.
  */
 class ProtocolException : public std::runtime_error {

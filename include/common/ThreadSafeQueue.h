@@ -18,9 +18,9 @@ public:
      * @param value The data to be pushed.
      */
     void push(const T& value) {
-        std::lock_guard<std::mutex> lock(mtx_);
+        std::lock_guard<std::mutex> lock(mutex_);
         queue_.push(value);
-        cv_.notify_one();
+        conditionVariable_.notify_one();
     }
 
     /**
@@ -28,8 +28,8 @@ public:
      * @return The data popped from the queue.
      */
     T pop() {
-        std::unique_lock<std::mutex> lock(mtx_);
-        cv_.wait(lock, [this] { return !queue_.empty(); });
+        std::unique_lock<std::mutex> lock(mutex_);
+        conditionVariable_.wait(lock, [this] { return !queue_.empty(); });
         T value = queue_.front();
         queue_.pop();
         return value;
@@ -38,12 +38,12 @@ public:
     /**
      * @brief Tries to pop data from the queue with a timeout.
      * @param value A reference to the variable to store the data.
-     * @param timeout_ms Timeout duration in milliseconds.
+     * @param timeoutMs Timeout duration in milliseconds.
      * @return True if data was successfully retrieved, false if a timeout occurred.
      */
-    bool try_pop(T& value, int timeout_ms) {
-        std::unique_lock<std::mutex> lock(mtx_);
-        if (cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return !queue_.empty(); })) {
+    bool tryPop(T& value, int timeoutMs) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (conditionVariable_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] { return !queue_.empty(); })) {
             value = queue_.front();
             queue_.pop();
             return true;
@@ -56,14 +56,14 @@ public:
      * @return True if the queue is empty, false otherwise.
      */
     bool empty() {
-        std::lock_guard<std::mutex> lock(mtx_);
+        std::lock_guard<std::mutex> lock(mutex_);
         return queue_.empty();
     }
 
 private:
     std::queue<T> queue_;
-    std::mutex mtx_;
-    std::condition_variable cv_;
+    std::mutex mutex_;
+    std::condition_variable conditionVariable_;
 };
 
 #endif // THREAD_SAFE_QUEUE_H

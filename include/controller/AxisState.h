@@ -1,4 +1,5 @@
-#pragma once
+#ifndef AXIS_STATE_H
+#define AXIS_STATE_H
 
 #include <mutex>
 #include <map>
@@ -12,12 +13,12 @@
  * This structure holds various status flags and values returned by the STR command.
  */
 struct AxisStatus {
-    int driving_state = 0;
-    int emg_signal = 0;
-    int org_norg_signal = 0;
-    int cw_ccw_limit_signal = 0;
-    int soft_limit_state = 0;
-    int correction_allowable_range = 0;
+    int drivingState = 0;
+    int emgSignal = 0;
+    int orgNorgSignal = 0;
+    int cwCcwLimitSignal = 0;
+    int softLimitState = 0;
+    int correctionAllowableRange = 0;
 };
 
 /**
@@ -32,34 +33,36 @@ class AxisState {
 public:
     /**
      * @brief Updates the current position of a specific axis.
-     * @param axis_no The axis number.
+     * @param axisNo The axis number.
      * @param position The new position value.
      */
-    void updatePosition(int axis_no, int position);
+    void updatePosition(int axisNo, int position);
 
     /**
      * @brief Updates the detailed status of a specific axis from a protocol response.
-     * @param axis_no The axis number.
+     * @param axisNo The axis number.
      * @param params A vector of strings containing status parameters from the STR command.
      */
-    void updateStatus(int axis_no, const std::vector<std::string>& params);
+    void updateStatus(int axisNo, const std::vector<std::string>& params);
 
     /**
      * @brief Retrieves the last known position of a specific axis.
-     * @param axis_no The axis number.
+     * @param axisNo The axis number.
      * @return The cached position value.
      */
-    int getPosition(int axis_no);
+    int getPosition(int axisNo);
 
     /**
      * @brief Retrieves the last known status details of a specific axis.
-     * @param axis_no The axis number.
+     * @param axisNo The axis number.
      * @return The cached AxisStatus structure.
      */
-    AxisStatus getStatusDetails(int axis_no);
+    AxisStatus getStatusDetails(int axisNo);
 
 private:
     std::map<int, int> positions_;
     std::map<int, AxisStatus> statuses_;
-    std::mutex mtx_;
+    std::mutex mutex_;
 };
+
+#endif // AXIS_STATE_H

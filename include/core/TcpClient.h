@@ -1,4 +1,5 @@
-#pragma once
+#ifndef TCP_CLIENT_H
+#define TCP_CLIENT_H
 
 #include "ICommunicationClient.h"
 #include <boost/asio.hpp>
@@ -14,18 +15,20 @@ class TcpClient : public ICommunicationClient {
 public:
     /**
      * @brief Constructor for TcpClient.
-     * @param io_context The Boost.Asio I/O context.
+     * @param ioContext The Boost.Asio I/O context.
      * @param host The hostname or IP address to connect to.
      * @param port The port number to connect to.
      */
-    TcpClient(boost::asio::io_context& io_context, const std::string& host, const std::string& port);
-    
+    TcpClient(boost::asio::io_context& ioContext, const std::string& host, const std::string& port);
+
     // Disable copy constructor and assignment operator
     TcpClient(const TcpClient&) = delete;
     TcpClient& operator=(const TcpClient&) = delete;
 
     /**
      * @brief Connects to the specified host and port.
+     * @param host The host address to connect to.
+     * @param port The port number to connect to.
      */
     void connect(const std::string& host, const std::string& port) override;
 
@@ -44,5 +47,7 @@ public:
 private:
     boost::asio::ip::tcp::socket socket_;
     boost::asio::ip::tcp::resolver resolver_;
-    boost::asio::streambuf response_buffer_; // Buffer to handle fragmented reads
+    boost::asio::streambuf responseBuffer_; // Buffer to handle fragmented reads
 };
+
+#endif // TCP_CLIENT_H

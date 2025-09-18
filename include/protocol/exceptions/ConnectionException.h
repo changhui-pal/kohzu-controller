@@ -6,6 +6,7 @@
 
 /**
  * @brief Exception class for communication layer errors.
+ *
  * This indicates errors related to network connectivity, such as connection failure or disconnection.
  */
 class ConnectionException : public std::runtime_error {
