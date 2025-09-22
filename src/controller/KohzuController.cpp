@@ -87,7 +87,15 @@ void KohzuController::monitorThreadFunction(int periodMs) {
 }
 
 /**
- * @brief Reads the current position of a specific axis.
+ * @brief Reads the current position of a specific axis from axisState.
+ * @param axisNo The axis number.
+ */
+int KohzuController::getPosition(int axisNo) {
+    return this->axisState_->getPosition(axisNo);
+}
+
+/**
+ * @brief Reads the current position of a specific axis and update axisState.
  * @param axisNo The axis number.
  */
 void KohzuController::readPosition(int axisNo) {
@@ -106,7 +114,7 @@ void KohzuController::readPosition(int axisNo) {
 }
 
 /**
- * @brief Reads the detailed status of a specific axis.
+ * @brief Reads the detailed status of a specific axis and update axisState.
  * @param axisNo The axis number.
  */
 void KohzuController::readStatus(int axisNo) {

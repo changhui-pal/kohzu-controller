@@ -65,6 +65,11 @@ public:
     void moveRelative(int axisNo, int distance, int speed = 0, int responseType = 0,
                       std::function<void(const ProtocolResponse&)> callback = nullptr);
 
+    /**
+    * @brief Reads the current position of a specific axis from axisState.
+    * @param axisNo The axis number.
+    */
+    int getPosition(int axisNo);
 private:
     void monitorThreadFunction(int periodMs);
     void readPosition(int axisNo);
