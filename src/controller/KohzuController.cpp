@@ -161,32 +161,32 @@ void KohzuController::moveRelative(int axisNo, int distance, int speed, int resp
 
     /**
      * @brief Commands the specified axis to perform an origin return operation.
-     * @param axis_no The axis number to move.
+     * @param axisNo The axis number to move.
      * @param speed The movement speed (0-9).
-     * @param response_type The response type (e.g., 0 for completion response).
+     * @param responseType The response type (e.g., 0 for completion response).
      * @param callback A function to be called when the command completes.
      */
-void KohzuController::moveOrigin(int axis_no, int speed, int response_type,
+void KohzuController::moveOrigin(int axisNo, int speed, int responseType,
                                  std::function<void(const ProtocolResponse&)> callback) {
     std::vector<std::string> params = {
         std::to_string(speed),
-        std::to_string(response_type)
+        std::to_string(responseType)
     };
-    protocolHandler_->sendCommand("ORG", axis_no, params, callback);
+    protocolHandler_->sendCommand("ORG", axisNo, params, callback);
 }
 
 /**
      * @brief Sets a system parameter value for a specified axis. (WSY command)
-     * @param axis_no The axis number to configure.
-     * @param system_no The system parameter number.
+     * @param axisNo The axis number to configure.
+     * @param systemNo The system parameter number.
      * @param value The value to set for the parameter.
      * @param callback A function to be called when the command completes.
      */
-void KohzuController::setSystem(int axis_no, int system_no, int value,
+void KohzuController::setSystem(int axisNo, int systemNo, int value,
                                 std::function<void(const ProtocolResponse&)> callback) {
     std::vector<std::string> params = {
-        std::to_string(system_no),
+        std::to_string(systemNo),
         std::to_string(value)
     };
-    protocolHandler_->sendCommand("WSY", axis_no, params, callback);
+    protocolHandler_->sendCommand("WSY", axisNo, params, callback);
 }

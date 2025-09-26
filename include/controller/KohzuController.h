@@ -67,22 +67,22 @@ public:
 
     /**
      * @brief Commands the specified axis to perform an origin return operation.
-     * @param axis_no The axis number to move.
+     * @param axisNo The axis number to move.
      * @param speed The movement speed (0-9).
-     * @param response_type The response type (e.g., 0 for completion response).
+     * @param responseType The response type (e.g., 0 for completion response).
      * @param callback A function to be called when the command completes.
      */
-    void moveOrigin(int axis_no, int speed = 0, int response_type = 0,
+    void moveOrigin(int axisNo, int speed = 0, int responseType = 0,
                     std::function<void(const ProtocolResponse&)> callback = nullptr);
 
     /**
      * @brief Sets a system parameter value for a specified axis. (WSY command)
-     * @param axis_no The axis number to configure.
-     * @param system_no The system parameter number.
+     * @param axisNo The axis number to configure.
+     * @param systemNo The system parameter number.
      * @param value The value to set for the parameter.
      * @param callback A function to be called when the command completes.
      */
-    void setSystem(int axis_no, int system_no, int value,
+    void setSystem(int axisNo, int systemNo, int value,
                    std::function<void(const ProtocolResponse&)> callback = nullptr);
 
 private:
