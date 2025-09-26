@@ -66,10 +66,25 @@ public:
                       std::function<void(const ProtocolResponse&)> callback = nullptr);
 
     /**
-    * @brief Reads the current position of a specific axis from axisState.
-    * @param axisNo The axis number.
-    */
-    int getPosition(int axisNo);
+     * @brief Commands the specified axis to perform an origin return operation.
+     * @param axis_no The axis number to move.
+     * @param speed The movement speed (0-9).
+     * @param response_type The response type (e.g., 0 for completion response).
+     * @param callback A function to be called when the command completes.
+     */
+    void moveOrigin(int axis_no, int speed = 0, int response_type = 0,
+                    std::function<void(const ProtocolResponse&)> callback = nullptr);
+
+    /**
+     * @brief Sets a system parameter value for a specified axis. (WSY command)
+     * @param axis_no The axis number to configure.
+     * @param system_no The system parameter number.
+     * @param value The value to set for the parameter.
+     * @param callback A function to be called when the command completes.
+     */
+    void setSystem(int axis_no, int system_no, int value,
+                   std::function<void(const ProtocolResponse&)> callback = nullptr);
+
 private:
     void monitorThreadFunction(int periodMs);
     void readPosition(int axisNo);

@@ -87,14 +87,6 @@ void KohzuController::monitorThreadFunction(int periodMs) {
 }
 
 /**
- * @brief Reads the current position of a specific axis from axisState.
- * @param axisNo The axis number.
- */
-int KohzuController::getPosition(int axisNo) {
-    return this->axisState_->getPosition(axisNo);
-}
-
-/**
  * @brief Reads the current position of a specific axis and update axisState.
  * @param axisNo The axis number.
  */
@@ -165,4 +157,36 @@ void KohzuController::moveRelative(int axisNo, int distance, int speed, int resp
     };
     // Use the provided callback directly
     protocolHandler_->sendCommand("RPS", axisNo, params, callback);
+}
+
+    /**
+     * @brief Commands the specified axis to perform an origin return operation.
+     * @param axis_no The axis number to move.
+     * @param speed The movement speed (0-9).
+     * @param response_type The response type (e.g., 0 for completion response).
+     * @param callback A function to be called when the command completes.
+     */
+void KohzuController::moveOrigin(int axis_no, int speed, int response_type,
+                                 std::function<void(const ProtocolResponse&)> callback) {
+    std::vector<std::string> params = {
+        std::to_string(speed),
+        std::to_string(response_type)
+    };
+    protocolHandler_->sendCommand("ORG", axis_no, params, callback);
+}
+
+/**
+     * @brief Sets a system parameter value for a specified axis. (WSY command)
+     * @param axis_no The axis number to configure.
+     * @param system_no The system parameter number.
+     * @param value The value to set for the parameter.
+     * @param callback A function to be called when the command completes.
+     */
+void KohzuController::setSystem(int axis_no, int system_no, int value,
+                                std::function<void(const ProtocolResponse&)> callback) {
+    std::vector<std::string> params = {
+        std::to_string(system_no),
+        std::to_string(value)
+    };
+    protocolHandler_->sendCommand("WSY", axis_no, params, callback);
 }
