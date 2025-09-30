@@ -4,7 +4,6 @@
 #include "protocol/ProtocolHandler.h"
 #include "controller/AxisState.h"
 #include <memory>
-#include <string>
 #include <thread>
 #include <atomic>
 #include <vector>
@@ -26,22 +25,38 @@ public:
      */
     explicit KohzuController(std::shared_ptr<ProtocolHandler> protocolHandler, std::shared_ptr<AxisState> axisState);
 
+    ~KohzuController();
+
     /**
      * @brief Initializes the controller's communication by starting the protocol handler.
      */
     void start();
 
     /**
-     * @brief Starts periodic status monitoring for specified axes.
-     * @param axesToMonitor A vector of axis numbers to monitor.
-     * @param periodMs The monitoring period in milliseconds.
+     * @brief Starts the background monitoring thread.
+     * @brief The thread will initially wait until axes are added for monitoring.
+     * @param initial_axes_to_monitor A vector of axis numbers to monitor initially.
+     * @param period_ms The monitoring period in milliseconds.
      */
-    void startMonitoring(const std::vector<int>& axesToMonitor, int periodMs);
+    void startMonitoring(const std::vector<int>& initialAxesToMonitor, int periodMs);
 
     /**
-     * @brief Stops periodic status monitoring.
+     * @brief Stops the background monitoring thread safely.
      */
     void stopMonitoring();
+
+    /**
+     * @brief Adds a single axis to the monitoring list in a thread-safe manner.
+     * @brief Wakes up the monitoring thread if it was waiting.
+     * @param axis_no The axis number to add.
+     */
+    void addAxisToMonitor(int axisNo);
+
+    /**
+     * @brief Removes a single axis from the monitoring list in a thread-safe manner.
+     * @param axis_no The axis number to remove.
+     */
+    void removeAxisToMonitor(int axisNo);
 
     /**
      * @brief Commands the specified axis to move to an absolute position.
@@ -96,6 +111,9 @@ private:
     std::atomic<bool> isMonitoringRunning_{false};
     std::unique_ptr<std::thread> monitoringThread_;
     std::vector<int> axesToMonitor_;
+
+    std::mutex monitorMutex_;
+    std::condition_variable monitorCv_;
 };
 
 #endif // KOHZU_CONTROLLER_H

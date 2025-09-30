@@ -1,10 +1,9 @@
 #include "controller/KohzuController.h"
 #include "spdlog/spdlog.h"
-#include <iostream>
-#include <sstream>
 #include <memory>
 #include <stdexcept>
 #include <chrono>
+#include <algorithm>
 
 /**
  * @brief Constructor for the KohzuController class.
@@ -20,6 +19,14 @@ KohzuController::KohzuController(std::shared_ptr<ProtocolHandler> protocolHandle
 }
 
 /**
+ * @brief Destructor for the KohzuController class.
+ * @brief Ensures the monitoring thread is properly stopped and joined.
+ */
+KohzuController::~KohzuController() {
+    stopMonitoring();
+}
+
+/**
  * @brief Starts the controller's communication logic.
  */
 void KohzuController::start() {
@@ -28,60 +35,93 @@ void KohzuController::start() {
 }
 
 /**
- * @brief Starts periodic status monitoring for specified axes.
- * @param axesToMonitor A vector of axis numbers to monitor.
+ * @brief Starts the background monitoring thread.
+ * @param initialAxesToMonitor A vector of axis numbers to monitor initially.
  * @param periodMs The monitoring period in milliseconds.
  */
-void KohzuController::startMonitoring(const std::vector<int>& axesToMonitor, int periodMs) {
+void KohzuController::startMonitoring(const std::vector<int>& initialAxesToMonitor, int periodMs) {
     if (isMonitoringRunning_.load()) {
-        spdlog::warn("Monitoring is already running. Please stop it first.");
-        return;
-    }
-    if (axesToMonitor.empty()) {
-        spdlog::warn("No axes to monitor. Monitoring not started.");
+        spdlog::warn("Monitoring thread is already running.");
         return;
     }
 
-    // Set the axes to monitor and start the thread
-    axesToMonitor_ = axesToMonitor;
+    axesToMonitor_ = initialAxesToMonitor;
     isMonitoringRunning_.store(true);
     monitoringThread_ = std::make_unique<std::thread>(&KohzuController::monitorThreadFunction, this, periodMs);
-    
-    // Log which axes are being monitored
-    std::stringstream ss;
-    ss << "Started periodic monitoring thread for axes: ";
-    for (int axis : axesToMonitor_) {
-        ss << axis << " ";
-    }
-    ss << "with a period of " << periodMs << "ms.";
-    spdlog::info(ss.str());
+    spdlog::info("Started periodic monitoring thread.");
 }
 
 /**
- * @brief Stops periodic status monitoring.
+ * @brief Stops the background monitoring thread safely.
  */
 void KohzuController::stopMonitoring() {
     if (!isMonitoringRunning_.load()) {
-        spdlog::warn("Monitoring is not running.");
         return;
     }
     isMonitoringRunning_.store(false);
+    monitorCv_.notify_one(); // Wake up the thread if it's waiting
     if (monitoringThread_ && monitoringThread_->joinable()) {
         monitoringThread_->join();
     }
+    monitoringThread_.reset();
     spdlog::info("Stopped periodic monitoring thread.");
 }
 
 /**
+ * @brief Adds a single axis to the monitoring list in a thread-safe manner.
+ * @param axisNo The axis number to add.
+ */
+void KohzuController::addAxisToMonitor(int axisNo) {
+    std::lock_guard<std::mutex> lock(monitorMutex_);
+    // Prevent duplicates
+    if (std::find(axesToMonitor_.begin(), axesToMonitor_.end(), axisNo) == axesToMonitor_.end()) {
+        axesToMonitor_.push_back(axisNo);
+        spdlog::debug("Added axis {} to monitoring list.", axisNo);
+    }
+    monitorCv_.notify_one(); // Wake up the thread
+}
+
+/**
+ * @brief Removes a single axis from the monitoring list in a thread-safe manner.
+ * @param axisNo The axis number to remove.
+ */
+void KohzuController::removeAxisToMonitor(int axisNo) {
+    std::lock_guard<std::mutex> lock(monitorMutex_);
+    auto it = std::remove(axesToMonitor_.begin(), axesToMonitor_.end(), axisNo);
+    if (it != axesToMonitor_.end()) {
+        axesToMonitor_.erase(it, axesToMonitor_.end());
+        spdlog::debug("Removed axis {} from monitoring list.", axisNo);
+    }
+}
+
+/**
  * @brief The function executed by the monitoring thread.
+ * @brief Waits until axes are available or until stopped.
  * @param periodMs The monitoring period in milliseconds.
  */
 void KohzuController::monitorThreadFunction(int periodMs) {
     while (isMonitoringRunning_.load()) {
-        for (int axisNo : axesToMonitor_) {
-            readPosition(axisNo);
-            readStatus(axisNo);
+        std::vector<int> current_axes;
+        {
+            std::unique_lock<std::mutex> lock(monitorMutex_);
+            monitorCv_.wait(lock, [this] {
+                return !isMonitoringRunning_.load() || !axesToMonitor_.empty();
+            });
+
+            if (!isMonitoringRunning_.load()) {
+                break; // Exit if stopped while waiting
+            }
+
+            // Copy the axes to a local variable to minimize lock time
+            current_axes = axesToMonitor_;
         }
+
+        // Perform monitoring outside the lock
+        for (int axis_no : current_axes) {
+            readPosition(axis_no);
+            readStatus(axis_no);
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(periodMs));
     }
 }
