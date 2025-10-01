@@ -215,7 +215,7 @@ void KohzuController::monitorThreadFunction(int periodMs) {
 ---
 
 ## 아키텍처
-'''Mermaid
+'''mermaid
 classDiagram
     direction TB
 
@@ -330,4 +330,5 @@ classDiagram
 ---
 
 ## 라이선스
+
 
