@@ -232,4 +232,3 @@ void KohzuController::monitorThreadFunction(int periodMs) {
 ---
 
 ## 라이선스
-MIT
