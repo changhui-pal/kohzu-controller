@@ -215,6 +215,104 @@ void KohzuController::monitorThreadFunction(int periodMs) {
 ---
 
 ## 아키텍처
+'''Mermaid
+classDiagram
+    direction TB
+
+    class ICommunicationClient {
+        <<interface>>
+        +connect(host: string, port: string) void
+        +asyncWrite(data: string) void
+        +asyncRead(callback: function) void
+    }
+
+    class TcpClient {
+        -socket_: tcp::socket
+        -resolver_: tcp::resolver
+        -responseBuffer_: streambuf
+        +connect(host: string, port: string) void
+        +asyncRead(callback: function) void
+        +asyncWrite(data: string) void
+    }
+
+    class ThreadSafeQueue~T~ {
+        <<template>>
+        -queue_: queue~T~
+        -mutex_: mutex
+        -conditionVariable_: condition_variable
+        +push(value: T) void
+        +pop() T
+        +tryPop(value: T&, timeoutMs: int) bool
+        +empty() bool
+    }
+
+    class AxisState {
+        -positions_: map<int, int>
+        -statuses_: map<int, AxisStatus>
+        -mutex_: mutex
+        +updatePosition(axisNo: int, position: int) void
+        +updateStatus(axisNo: int, params: vector<string>) void
+        +getPosition(axisNo: int) int
+        +getStatusDetails(axisNo: int) AxisStatus
+    }
+
+    class ProtocolHandler {
+        -client_: shared_ptr<ICommunicationClient>
+        -responseCallbacks_: map<string, ThreadSafeQueue<function>>
+        -callbackMutex_: mutex
+        +initialize() void
+        +sendCommand(baseCommand: string, axisNo: int, params: vector<string>, callback: function) void
+        +handleRead(responseData: string) void
+        +parseResponse(response: string) ProtocolResponse
+    }
+
+    class KohzuController {
+        -protocolHandler_: shared_ptr<ProtocolHandler>
+        -axisState_: shared_ptr<AxisState>
+        -monitoringThread_: unique_ptr<thread>
+        -axesToMonitor_: vector<int>
+        -monitorMutex_: mutex
+        -monitorCv_: condition_variable
+        +start() void
+        +startMonitoring(periodMs: int) void
+        +stopMonitoring() void
+        +addAxisToMonitor(axisNo: int) void
+        +removeAxisToMonitor(axisNo: int) void
+        +moveAbsolute(axisNo: int, position: int, speed: int, responseType: int, callback: function) void
+        +moveRelative(axisNo: int, distance: int, speed: int, responseType: int, callback: function) void
+        +moveOrigin(axisNo: int, speed: int, responseType: int, callback: function) void
+        +setSystem(axisNo: int, systemNo: int, value: int, callback: function) void
+    }
+
+    class ProtocolResponse {
+        <<struct>>
+        +status: char
+        +axisNo: int
+        +command: string
+        +params: vector<string>
+        +fullResponse: string
+    }
+
+    class AxisStatus {
+        <<struct>>
+        +drivingState: int
+        +emgSignal: int
+        +orgNorgSignal: int
+        +cwCcwLimitSignal: int
+        +softLimitState: int
+        +correctionAllowableRange: int
+    }
+
+    %% 관계 정의
+    TcpClient ..|> ICommunicationClient : implements
+    ProtocolHandler o--> ICommunicationClient : uses
+    ProtocolHandler o--> ThreadSafeQueue : uses
+    ProtocolHandler --> ProtocolResponse : produces
+    KohzuController o--> ProtocolHandler : uses
+    KohzuController o--> AxisState : uses
+    AxisState --> AxisStatus : contains
+    KohzuController --> ThreadSafeQueue : monitors with
+'''
 - **코어 계층**: `TcpClient`가 Boost.Asio로 TCP 통신 관리.
 - **프로토콜 계층**: `ProtocolHandler`가 명령 형식화 및 응답 파싱.
 - **컨트롤러 계층**: `KohzuController`가 이동/모니터링 API 제공.
@@ -232,3 +330,4 @@ void KohzuController::monitorThreadFunction(int periodMs) {
 ---
 
 ## 라이선스
+
