@@ -215,7 +215,7 @@ void KohzuController::monitorThreadFunction(int periodMs) {
 ---
 
 ## 아키텍처
-'''mermaid
+```mermaid
 classDiagram
     direction TB
 
@@ -312,7 +312,7 @@ classDiagram
     KohzuController o--> AxisState : uses
     AxisState --> AxisStatus : contains
     KohzuController --> ThreadSafeQueue : monitors with
-'''
+```
 - **코어 계층**: `TcpClient`가 Boost.Asio로 TCP 통신 관리.
 - **프로토콜 계층**: `ProtocolHandler`가 명령 형식화 및 응답 파싱.
 - **컨트롤러 계층**: `KohzuController`가 이동/모니터링 API 제공.
@@ -330,5 +330,6 @@ classDiagram
 ---
 
 ## 라이선스
+
 
 
