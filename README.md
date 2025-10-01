@@ -212,6 +212,45 @@ void KohzuController::monitorThreadFunction(int periodMs) {
 ```
 - **설명**: condition_variable로 대기, 축 목록 복사 후 폴링. atomic으로 중지 제어. sleep_for 주기 대기.
 
+### 주요 기능 워크플로우
+- **설명**: 비동기 명령 처리와 모니터링 스레드의 워크플로우
+```mermaid
+sequenceDiagram
+    participant User
+    participant KohzuController
+    participant ProtocolHandler
+    participant TcpClient
+    participant MonitoringThread
+    participant AxisState
+
+    User->>KohzuController: start()
+    KohzuController->>ProtocolHandler: initialize()
+    ProtocolHandler->>TcpClient: asyncRead(callback)
+
+    User->>KohzuController: startMonitoring(100ms)
+    KohzuController->>MonitoringThread: start thread
+    loop Every 100ms
+        MonitoringThread->>KohzuController: check axesToMonitor_
+        MonitoringThread->>ProtocolHandler: sendCommand("RDP", axisNo, [], callback)
+        ProtocolHandler->>TcpClient: asyncWrite(command)
+        TcpClient->>ProtocolHandler: asyncRead -> handleRead(response)
+        ProtocolHandler->>AxisState: updatePosition(axisNo, pos)
+        MonitoringThread->>ProtocolHandler: sendCommand("STR", axisNo, [], callback)
+        ProtocolHandler->>AxisState: updateStatus(axisNo, params)
+    end
+
+    User->>KohzuController: moveAbsolute(axisNo, position, speed)
+    KohzuController->>ProtocolHandler: sendCommand("APS", axisNo, params, callback)
+    ProtocolHandler->>TcpClient: asyncWrite(formattedCommand)
+    TcpClient->>ProtocolHandler: asyncRead -> handleRead(response)
+    ProtocolHandler->>KohzuController: callback(ProtocolResponse)
+    KohzuController->>AxisState: update from response
+    KohzuController->>User: log completion
+
+    User->>KohzuController: stopMonitoring()
+    KohzuController->>MonitoringThread: stop and join
+```
+
 ---
 
 ## 아키텍처
@@ -330,6 +369,7 @@ classDiagram
 ---
 
 ## 라이선스
+
 
 
 
